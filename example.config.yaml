@@ -1,0 +1,120 @@
+# pesan application config - app config + provider/OAuth definitions only.
+# No per-user account rows (those live in pesan.db) and no user tokens (keychain).
+# Accounts reference a provider here by key; hosts and OAuth credentials are NOT
+# duplicated in the database.
+
+providers: # OAuth app + server definitions, shared across accounts
+  gmail:
+    imap: { host: imap.gmail.com, port: 993 }
+    smtp: { host: smtp.gmail.com, port: 465 }
+    oauth:
+      auth_url: "https://accounts.google.com/o/oauth2/v2/auth"
+      token_url: "https://oauth2.googleapis.com/token"
+      scopes: ["https://mail.google.com/"]
+      client_id: "" # e.g. "xxxx.apps.googleusercontent.com"
+      client_secret: "" # Gmail "Desktop app" secret (non-confidential for installed apps)
+      # client_secret can also be given via env: ${PESAN_GMAIL_SECRET}
+      # Redirect URI is not configured: pesan advertises http://localhost (no
+      # listener) and you paste the redirect URL back in. Register http://localhost
+      # on the OAuth client ("Desktop app" accepts loopback URLs).
+  outlook: # Outlook.com / Microsoft 365
+    imap: { host: outlook.office365.com, port: 993 }
+    smtp: { host: smtp.office365.com, port: 587 }
+    oauth:
+      auth_url: "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
+      token_url: "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+      scopes:
+        - "https://outlook.office.com/IMAP.AccessAsUser.All"
+        - "https://outlook.office.com/SMTP.Send"
+        - "offline_access"
+      client_id: "" # Azure app (client) id, e.g. "00000000-0000-0000-0000-000000000000"
+      client_secret: "" # blank for a public/desktop app registration (PKCE)
+      # Redirect URI is not configured: pesan advertises http://localhost (no
+      # listener) and you paste the redirect URL back in. Register http://localhost
+      # on the app ("Mobile and desktop applications" allows loopback URLs).
+  # Password-login provider: omit the `oauth` block entirely. Accounts on such a
+  # provider authenticate with IMAP/SMTP LOGIN using a password you enter in the
+  # account form (stored in the OS keyring). Use an app password if the provider
+  # requires one.
+  # fastmail:
+  #   imap: { host: imap.fastmail.com, port: 993 }
+  #   smtp: { host: smtp.fastmail.com, port: 465 }
+
+ui:
+  theme: gruvbox # dark | light | mono, or any custom theme name below
+  ascii: false # true = ASCII glyph fallback (no unicode icons)
+  layout: [2, 4, 2] # 10-grid pane widths; only the sidebar slot is used (messages open full-screen)
+  account_label: name # sidebar account label: name | email
+  border_type: plain # pane border weight: plain | rounded | thick | double
+  statusbar_position: bottom # single statusbar placement: top | bottom
+  poll_interval_secs: 120 # background refresh (fallback when IMAP IDLE unavailable)
+
+notifications:
+  enabled: true # desktop notification on new mail
+  folders: [INBOX] # which mailboxes to watch
+  show_sender: true # include From/subject in the notification body
+  sound: false
+
+compose:
+  editor:
+    null # external editor cmd; null => $VISUAL, then $EDITOR, then "vi"
+    # e.g. "nvim", or with args: "code --wait"
+  edit_headers: false # true = editor buffer also includes To/Cc/Subject headers
+
+# Optional: define your own themes and select one via `ui.theme` above. Every
+# role is required. Values are colors: #rrggbb hex, a named color (e.g. blue),
+# or an indexed 0-255. The built-in names dark/light/mono are reserved.
+themes:
+  gruvbox: # the shipped default (ui.theme: gruvbox)
+    bg: "#282828"
+    fg: "#ebdbb2"
+    dim: "#928374"
+    accent: "#83a598"
+    unread: "#fabd2f"
+    success: "#b8bb26"
+    warning: "#fe8019"
+    error: "#fb4934"
+    border: "#3c3836"
+    border_focus: "#83a598"
+
+# Optional: remap any action to your own keys, grouped by keymap section.
+# A section only affects the bindings active in that context: `global` works
+# everywhere; the others apply while that pane/screen has focus. Sections:
+# global, folders, list, reader, compose, settings, search, confirm. An
+# override replaces ALL built-in keys for the action within that section
+# (other sections keep their built-ins). Key syntax: a single key, a chord
+# such as gg, or ctrl+<key>/shift+<key>/alt+<key>. Key names: enter, esc,
+# space, tab, up, down, left, right, home, end, pgup, pgdn, delete, backspace.
+# Each action takes a single sequence or a list (first match wins). Unknown
+# sections, actions, or unparseable keys are ignored.
+keybinding:
+  global: # work in every context
+    quit: q
+    help: "?"
+    jobs: "`" # toggle the background job tracker window
+    settings: S
+    toggle_sidebar: z
+    refresh: R # re-fetch the current mailbox from the server
+  folders: # sidebar: folder tree / account switcher
+    select_folder: o
+    expand_folder: l
+    collapse_folder: h
+  list: # message list
+    open_message: [enter, o] # open the selected message with Enter or o
+    compose: c # compose a new message
+    reply: r
+    forward: f
+  reader: # full-screen message view
+    reply: r
+    forward: f
+  compose: # compose form (body is edited in $EDITOR)
+    send: ctrl+s
+    save_draft: ctrl+d
+    external_editor: [e, ctrl+e]
+  settings:
+    save_settings: W
+  search:
+    commit_search: enter
+  confirm: # yes/no dialog
+    confirm_yes: [y, enter]
+    confirm_no: [n, esc]
