@@ -14,8 +14,8 @@ async fn compose_inline_headers_and_external_body() {
     }
     send_key!(app, Key::enter());
     assert!(!app.compose.as_ref().unwrap().editing);
-    // j down to Subject (To -> Cc -> Bcc -> ReplyTo -> Subject), edit it.
-    for _ in 0..4 {
+    // j down to Subject (To -> Bcc -> Subject in the 2-col grid), edit it.
+    for _ in 0..2 {
         send_key!(app, Key::ch('j'));
     }
     assert_eq!(app.compose.as_ref().unwrap().focus, ComposeFocus::Subject);
@@ -96,8 +96,8 @@ async fn compose_send_offline_reports_error_and_keeps_compose() {
         send_key!(app, Key::ch(ch));
     }
     send_key!(app, Key::enter());
-    for _ in 0..4 {
-        send_key!(app, Key::ch('j')); // -> Subject
+    for _ in 0..2 {
+        send_key!(app, Key::ch('j')); // -> Subject (To -> Bcc -> Subject)
     }
     send_key!(app, Key::ch('e'));
     for ch in "Hello".chars() {
@@ -156,10 +156,14 @@ async fn compose_jk_navigates_and_e_edits_headers() {
     send_key!(app, Key::ch('z'));
     assert_eq!(app.compose.as_ref().unwrap().to.text(), "");
 
-    // j/k move between rows.
-    send_key!(app, Key::ch('j'));
+    // h/l move left/right, j/k move up/down within the 2-column grid.
+    send_key!(app, Key::ch('l')); // To -> Cc (right)
     assert_eq!(app.compose.as_ref().unwrap().focus, ComposeFocus::Cc);
-    send_key!(app, Key::ch('k'));
+    send_key!(app, Key::ch('h')); // Cc -> To (left)
+    assert_eq!(app.compose.as_ref().unwrap().focus, ComposeFocus::To);
+    send_key!(app, Key::ch('j')); // To -> Bcc (down)
+    assert_eq!(app.compose.as_ref().unwrap().focus, ComposeFocus::Bcc);
+    send_key!(app, Key::ch('k')); // Bcc -> To (up)
     assert_eq!(app.compose.as_ref().unwrap().focus, ComposeFocus::To);
 
     // e enters edit mode; now keys type into the field; Esc leaves.

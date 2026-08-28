@@ -21,5 +21,4 @@ pub fn print_version() {
 }
 
 #[cfg(test)]
-mod tests {
-}
+mod tests {}

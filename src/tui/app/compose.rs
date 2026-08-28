@@ -47,6 +47,50 @@ impl ComposeFocus {
     pub fn prev(self) -> Self {
         Self::ORDER[(self.index() + Self::ORDER.len() - 1) % Self::ORDER.len()]
     }
+
+    /// Grid-aware movement matching the 2-column compose layout. `dir` is one of
+    /// 'h' (left), 'j' (down), 'k' (up), 'l' (right). The six header/attach
+    /// fields form a 3x2 grid; `Body` sits below it. Used so h/j/k/l walk the
+    /// grid the way it is drawn.
+    pub(crate) fn grid_step(self, dir: char) -> Self {
+        if self == ComposeFocus::Body {
+            // Leaving the body upward returns to the bottom-right cell.
+            return match dir {
+                'k' => ComposeFocus::Attach,
+                _ => ComposeFocus::Body,
+            };
+        }
+        let (r, c): (usize, usize) = match self {
+            ComposeFocus::To => (0, 0),
+            ComposeFocus::Cc => (0, 1),
+            ComposeFocus::Bcc => (1, 0),
+            ComposeFocus::ReplyTo => (1, 1),
+            ComposeFocus::Subject => (2, 0),
+            ComposeFocus::Attach => (2, 1),
+            ComposeFocus::Body => unreachable!(),
+        };
+        let (r, c) = match dir {
+            'k' => (r.saturating_sub(1), c),
+            'j' => {
+                if r == 2 {
+                    return ComposeFocus::Body;
+                }
+                (r + 1, c)
+            }
+            'h' => (r, c.saturating_sub(1)),
+            'l' => (r, (c + 1).min(1)),
+            _ => (r, c),
+        };
+        match (r, c) {
+            (0, 0) => ComposeFocus::To,
+            (0, 1) => ComposeFocus::Cc,
+            (1, 0) => ComposeFocus::Bcc,
+            (1, 1) => ComposeFocus::ReplyTo,
+            (2, 0) => ComposeFocus::Subject,
+            (2, 1) => ComposeFocus::Attach,
+            _ => self,
+        }
+    }
 }
 
 /// A draft under composition. Header fields are edited inline in the TUI; only

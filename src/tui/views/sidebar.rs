@@ -32,6 +32,9 @@ pub(super) struct SidebarProps {
     pub filtering: bool,
     pub filter: String,
     pub rows: Vec<SideRow>,
+    /// Index into `rows` that the cursor currently highlights (the row drawn
+    /// with the inverse selection style). `None` when nothing is selected.
+    pub selected: Option<usize>,
 }
 
 /// Resolve the sidebar's contents from app state. Pure read; no styling.
@@ -106,12 +109,15 @@ pub(super) fn props(app: &App) -> SidebarProps {
         }
     }
 
+    let selected = rows.iter().position(|r| r.selected);
+
     SidebarProps {
         focused,
         collapsed: app.sidebar_collapsed,
         filtering: app.sidebar_filtering,
         filter: app.sidebar_filter.clone(),
         rows,
+        selected,
     }
 }
 
@@ -132,7 +138,7 @@ pub(super) fn render(frame: &mut Frame, area: Rect, p: &SidebarProps, skin: &Ski
     // While filtering accounts, a live filter bar occupies the pane's bottom row.
     let (tree_area, filter_bar) = if p.filtering {
         let [tree, bar] =
-            Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(inner);
+            Layout::vertical([Constraint::Min(0), Constraint::Length(3)]).areas(inner);
         (tree, Some(bar))
     } else {
         (inner, None)
@@ -140,6 +146,9 @@ pub(super) fn render(frame: &mut Frame, area: Rect, p: &SidebarProps, skin: &Ski
 
     // Three-column folder table: MAILBOX (name) | MSGS (total) | UNREAD. The
     // numeric columns are right-aligned into fixed-width slots at the pane edge.
+    // The mailboxes section itself is drawn with a ratatui `List` so cursor
+    // highlighting, scrolling, and keyboard navigation are handled by the widget,
+    // while each folder row keeps its three-column table layout.
     let width = tree_area.width as usize;
     let msgs_w = 6usize;
     let unread_w = 7usize;
@@ -151,48 +160,43 @@ pub(super) fn render(frame: &mut Frame, area: Rect, p: &SidebarProps, skin: &Ski
         format!("{name:<name_w$}{msgs:>msgs_w$}{unread:>unread_w$}")
     };
 
-    let mut lines: Vec<Line> = Vec::new();
+    // Resolve each row into a `ListItem` carrying its own (unselected) style.
+    // `List` applies `highlight_style` to whichever item is selected, so an
+    // item's base style is only used when it is not the cursor row.
+    let mut items: Vec<ListItem> = Vec::new();
     for row in &p.rows {
-        // Active account is shown in bold; no leading marker glyph and no
-        // connection/unread indicator on the account line.
-        let style = if row.selected {
-            skin.theme.selected_style()
-        } else if matches!(&row.kind, RowKind::Account { active: true, .. }) {
-            skin.theme.fg_style().add_modifier(Modifier::BOLD)
-        } else if matches!(&row.kind, RowKind::Account { active: false, .. }) {
-            skin.theme.dim_style()
-        } else {
-            skin.theme.fg_style()
+        // Active account is shown in bold; the column header and inactive
+        // account lines are dimmed. The selected row's style is supplied by the
+        // list's `highlight_style` below, not here.
+        let style = match &row.kind {
+            RowKind::Account { active: true, .. } => {
+                skin.theme.fg_style().add_modifier(Modifier::BOLD)
+            }
+            RowKind::Account { active: false, .. } => skin.theme.dim_style(),
+            RowKind::ColumnHeader => skin.theme.dim_style(),
+            RowKind::Folder { .. } => skin.theme.fg_style(),
         };
         let body = match &row.kind {
-            RowKind::Account { label, .. } => {
-                if row.selected {
-                    format!(" {label} ")
-                } else {
-                    label.clone()
-                }
-            }
-            RowKind::ColumnHeader => {
-                lines.push(Line::from(Span::styled(
-                    three_col("MAILBOX", "MSGS", "UNREAD"),
-                    skin.theme.dim_style(),
-                )));
-                continue;
-            }
+            RowKind::Account { label, .. } => label.clone(),
+            RowKind::ColumnHeader => three_col("MAILBOX", "MSGS", "UNREAD"),
             RowKind::Folder { name, msgs, unread } => three_col(name, msgs, unread),
         };
-        lines.push(Line::from(Span::styled(body, style)));
+        items.push(ListItem::new(Line::from(Span::styled(body, style))));
     }
-    if p.filtering && lines.is_empty() {
-        lines.push(Line::from(Span::styled(
+    if p.filtering && items.is_empty() {
+        items.push(ListItem::new(Line::from(Span::styled(
             " no accounts match",
             skin.theme.dim_style(),
-        )));
+        ))));
     }
-    frame.render_widget(
-        Paragraph::new(lines).style(skin.theme.fg_style()),
-        tree_area,
-    );
+
+    let mut state = ListState::default().with_selected(p.selected);
+    let list = List::new(items)
+        .style(skin.theme.fg_style())
+        .highlight_style(skin.theme.selected_style())
+        .highlight_symbol("")
+        .scroll_padding(1);
+    frame.render_stateful_widget(list, tree_area, &mut state);
     if let Some(bar) = filter_bar {
         render_filter_bar(frame, bar, skin, &p.filter, p.filtering);
     }

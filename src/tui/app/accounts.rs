@@ -368,6 +368,60 @@ impl App {
         }
     }
 
+    /// Enter the new-account wizard at step 1: a dedicated provider chooser
+    /// (rather than dropping straight into the form with a provider dropdown).
+    /// Selecting a provider from here advances to the identity/auth form.
+    pub(crate) fn begin_add_account(&mut self) {
+        let Some(state) = &mut self.settings else {
+            return;
+        };
+        state.editing = true;
+        state.is_new = true;
+        state.choosing_provider = true;
+        state.choose_idx = 0;
+        state.field_editing = false;
+        state.form = None;
+        state.focus = SettingsFocus::Provider;
+    }
+
+    /// Advance the new-account wizard from the provider chooser to the
+    /// identity/auth form, pre-selecting the chosen provider. The first account
+    /// added to an empty install defaults to the default account.
+    pub(crate) fn choose_provider(&mut self) {
+        let Some(state) = &mut self.settings else {
+            return;
+        };
+        if !state.choosing_provider {
+            return;
+        }
+        let provider_idx = state.choose_idx;
+        if let Some(form) = state.form.as_mut() {
+            // Editing an existing account: keep its identity, just switch the
+            // provider. The chooser is reused as the picker so the two flows
+            // feel the same.
+            form.provider_idx = provider_idx;
+            state.choosing_provider = false;
+            state.field_editing = false;
+            self.settings_reset_focus_to_first();
+            return;
+        }
+        // New account: build a fresh identity/auth form for the chosen provider.
+        let is_default = self.accounts.is_empty();
+        state.form = Some(AccountForm {
+            name: TextInput::new(String::new()),
+            email: TextInput::new(String::new()),
+            password: TextInput::new(String::new()),
+            provider_idx,
+            is_default,
+        });
+        state.choosing_provider = false;
+        state.is_new = true;
+        state.editing = true;
+        state.field_editing = false;
+        // Focus the first field for the chosen provider's auth kind.
+        self.settings_reset_focus_to_first();
+    }
+
     pub(crate) fn begin_edit_account(&mut self, is_new: bool) {
         let Some(state) = &mut self.settings else {
             return;
@@ -436,12 +490,34 @@ impl App {
     /// OAuth providers auto-fill the email (so it is not a field) and end on an
     /// Authorize button; password providers take a password and end on Save.
     pub(crate) fn form_focus_order(&self) -> Vec<SettingsFocus> {
+        // In the new-account wizard the provider was already chosen on the
+        // chooser screen, so it isn't an editable step in the form.
+        let new_wizard = self
+            .settings
+            .as_ref()
+            .is_some_and(|s| s.is_new && !s.choosing_provider);
         if self.form_provider_is_oauth() {
+            if new_wizard {
+                vec![
+                    SettingsFocus::Name,
+                    SettingsFocus::IsDefault,
+                    SettingsFocus::Authorize,
+                ]
+            } else {
+                vec![
+                    SettingsFocus::Provider,
+                    SettingsFocus::Name,
+                    SettingsFocus::IsDefault,
+                    SettingsFocus::Authorize,
+                ]
+            }
+        } else if new_wizard {
             vec![
-                SettingsFocus::Provider,
                 SettingsFocus::Name,
+                SettingsFocus::Email,
+                SettingsFocus::Password,
                 SettingsFocus::IsDefault,
-                SettingsFocus::Authorize,
+                SettingsFocus::Save,
             ]
         } else {
             vec![

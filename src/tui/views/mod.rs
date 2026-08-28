@@ -16,7 +16,9 @@ pub(crate) use ratatui::Frame;
 pub(crate) use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 pub(crate) use ratatui::style::Modifier;
 pub(crate) use ratatui::text::{Line, Span};
-pub(crate) use ratatui::widgets::{Block, Cell, Clear, Paragraph, Row, Table, TableState, Wrap};
+pub(crate) use ratatui::widgets::{
+    Block, Cell, Clear, Gauge, List, ListItem, ListState, Paragraph, Row, Table, TableState, Wrap,
+};
 
 pub(crate) use crate::shared::fmt::{full_timestamp, relative_date, truncate};
 pub(crate) use crate::tui::app::{App, ComposeFocus, ComposeMode};

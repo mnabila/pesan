@@ -144,7 +144,8 @@ fn temp_db_path() -> PathBuf {
 
 async fn focus_authorize(app: &mut App) {
     send_key!(app, Key::ch('S'));
-    send_key!(app, Key::ch('a')); // add account -> enters edit mode
+    send_key!(app, Key::ch('a')); // add account -> provider chooser
+    send_key!(app, Key::enter()); // pick the first provider -> form
     // The OAuth field order is Provider -> Name -> Default -> Authorize; step
     // down until the Authorize button is focused.
     for _ in 0..6 {

@@ -73,12 +73,22 @@ impl App {
             KeyCode::Char('?') => return self.action(Action::Help).await,
             KeyCode::Char('j') => {
                 if let Some(c) = &mut self.compose {
-                    c.focus = c.focus.next();
+                    c.focus = c.focus.grid_step('j');
                 }
             }
             KeyCode::Char('k') => {
                 if let Some(c) = &mut self.compose {
-                    c.focus = c.focus.prev();
+                    c.focus = c.focus.grid_step('k');
+                }
+            }
+            KeyCode::Char('h') | KeyCode::Left => {
+                if let Some(c) = &mut self.compose {
+                    c.focus = c.focus.grid_step('h');
+                }
+            }
+            KeyCode::Char('l') | KeyCode::Right => {
+                if let Some(c) = &mut self.compose {
+                    c.focus = c.focus.grid_step('l');
                 }
             }
             // Body row: e/Enter open the editor; J/K (Shift) and arrows scroll.
@@ -106,12 +116,12 @@ impl App {
             // Header/attach rows: arrows also move; e/Enter start editing.
             KeyCode::Down => {
                 if let Some(c) = &mut self.compose {
-                    c.focus = c.focus.next();
+                    c.focus = c.focus.grid_step('j');
                 }
             }
             KeyCode::Up => {
                 if let Some(c) = &mut self.compose {
-                    c.focus = c.focus.prev();
+                    c.focus = c.focus.grid_step('k');
                 }
             }
             KeyCode::Char('e') | KeyCode::Enter => {
@@ -166,6 +176,13 @@ impl App {
             return;
         }
 
+        // Provider chooser (new-account step 1) is its own mode: intercept before
+        // the form/edit dispatch and the save/help app keys below.
+        if self.settings.as_ref().is_some_and(|s| s.choosing_provider) {
+            self.settings_choose_provider_key(key).await;
+            return;
+        }
+
         // Shift+W saves, except while actively typing into a form text field,
         // where the character must reach the input instead.
         let field_editing = self.settings.as_ref().is_some_and(|s| s.field_editing);
@@ -197,6 +214,47 @@ impl App {
             self.settings_edit_key(key, focus).await;
         } else {
             self.settings_nav_key(key, focus).await;
+        }
+    }
+
+    /// Provider chooser (new-account step 1): `j`/`k` move the selection,
+    /// `Enter`/`Space` confirms and advances to the identity/auth form, `Esc`
+    /// cancels back to the account list. Its own mode, so it intercepts before
+    /// the form/edit dispatch above.
+    async fn settings_choose_provider_key(&mut self, key: &Key) {
+        let max = self
+            .settings
+            .as_ref()
+            .map(|s| s.providers.len().saturating_sub(1))
+            .unwrap_or(0);
+        match key.code {
+            KeyCode::Esc => {
+                if let Some(s) = &mut self.settings {
+                    s.choosing_provider = false;
+                    if s.is_new {
+                        // Cancelling the new-account wizard discards the form.
+                        s.editing = false;
+                        s.form = None;
+                        s.focus = SettingsFocus::Accounts;
+                    } else {
+                        // Cancelling a provider switch while editing returns to
+                        // the identity/auth form, keeping its fields.
+                        s.focus = SettingsFocus::Provider;
+                    }
+                }
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                if let Some(s) = &mut self.settings {
+                    s.choose_idx = (s.choose_idx + 1).min(max);
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if let Some(s) = &mut self.settings {
+                    s.choose_idx = s.choose_idx.saturating_sub(1);
+                }
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => self.choose_provider(),
+            _ => {}
         }
     }
 
@@ -244,9 +302,13 @@ impl App {
             }
             return;
         }
+
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => return self.cycle_settings_focus(1),
             KeyCode::Char('k') | KeyCode::Up => return self.cycle_settings_focus(-1),
+            // `h`/`l` move focus left/right within the 2-column form grid.
+            KeyCode::Char('h') | KeyCode::Left => return self.settings_focus_horizontal(-1),
+            KeyCode::Char('l') | KeyCode::Right => return self.settings_focus_horizontal(1),
             _ => {}
         }
         match focus {
@@ -270,21 +332,20 @@ impl App {
                 }
             }
             Some(SettingsFocus::Provider) => {
-                // Provider stays valid across an auth-kind switch (it appears in
-                // both field orders), so no focus fix-up is needed here. h/l cycle
-                // the provider (arrows still work as an alternate).
-                let dec = matches!(key.code, KeyCode::Char('h') | KeyCode::Left);
-                let inc = matches!(key.code, KeyCode::Char('l') | KeyCode::Right);
-                if (dec || inc)
+                // Editing an existing account: switch providers through the same
+                // chooser the new-account wizard uses (clearer than a tiny inline
+                // dropdown). Enter/Space/`o` open it; h/l move focus like any field.
+                let open = matches!(
+                    key.code,
+                    KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Char('o')
+                );
+                if open
                     && let Some(s) = &mut self.settings
                     && let Some(form) = s.form.as_mut()
                 {
-                    let max = s.providers.len().saturating_sub(1);
-                    if dec {
-                        form.provider_idx = form.provider_idx.saturating_sub(1);
-                    } else {
-                        form.provider_idx = (form.provider_idx + 1).min(max);
-                    }
+                    s.choose_idx = form.provider_idx;
+                    s.choosing_provider = true;
+                    s.field_editing = false;
                 }
             }
             Some(SettingsFocus::IsDefault) => {
@@ -318,7 +379,7 @@ impl App {
             // `o` opens the selected account (its form doubles as the detail view);
             // Esc exits. `a` adds a new account.
             KeyCode::Char('o') => self.begin_edit_account(false),
-            KeyCode::Char('a') => self.begin_edit_account(true),
+            KeyCode::Char('a') => self.begin_add_account(),
             KeyCode::Char('/') => {
                 if let Some(s) = &mut self.settings {
                     s.filtering = true;
@@ -377,5 +438,28 @@ impl App {
         let pos = order.iter().position(|f| *f == state.focus).unwrap_or(0) as isize;
         let len = order.len() as isize;
         state.focus = order[(pos + dir).rem_euclid(len) as usize];
+    }
+
+    /// Move focus horizontally (left/right) within the 2-column form grid. The
+    /// focus order is row-major, so the horizontal neighbour of item `i` is `i`
+    /// with its low bit toggled - the other column in the same row, when it
+    /// exists.
+    fn settings_focus_horizontal(&mut self, dir: isize) {
+        let order = self.form_focus_order();
+        let Some(state) = &mut self.settings else {
+            return;
+        };
+        let pos = order.iter().position(|f| *f == state.focus).unwrap_or(0) as isize;
+        let len = order.len() as isize;
+        let target = if dir > 0 {
+            // Move right: from a left-column (even) item to the right one.
+            if pos % 2 == 0 { pos + 1 } else { pos }
+        } else {
+            // Move left: from a right-column (odd) item to the left one.
+            if pos % 2 == 1 { pos - 1 } else { pos }
+        };
+        if target >= 0 && target < len {
+            state.focus = order[target as usize];
+        }
     }
 }

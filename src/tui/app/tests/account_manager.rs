@@ -380,7 +380,7 @@ async fn authorize_reports_missing_provider_credentials() {
 async fn password_provider_saves_account_and_stores_password() {
     let mut app = test_app_with_password_provider().await;
     send_key!(app, Key::ch('S'));
-    send_key!(app, Key::ch('a')); // add a new account
+    send_key!(app, Key::ch('a')); // add a new account -> provider chooser
     // Select the password provider; the form must switch to the password fields.
     let idx = app
         .settings
@@ -390,13 +390,8 @@ async fn password_provider_saves_account_and_stores_password() {
         .iter()
         .position(|p| p == "fastmail")
         .unwrap();
-    app.settings
-        .as_mut()
-        .unwrap()
-        .form
-        .as_mut()
-        .unwrap()
-        .provider_idx = idx;
+    app.settings.as_mut().unwrap().choose_idx = idx;
+    app.choose_provider();
     assert!(!app.form_provider_is_oauth());
     assert!(
         app.form_focus_order().contains(&SettingsFocus::Password),
@@ -445,10 +440,10 @@ async fn save_password_account_requires_a_password() {
         .iter()
         .position(|p| p == "fastmail")
         .unwrap();
+    app.settings.as_mut().unwrap().choose_idx = idx;
+    app.choose_provider();
     {
-        let state = app.settings.as_mut().unwrap();
-        state.form.as_mut().unwrap().provider_idx = idx;
-        let form = state.form.as_mut().unwrap();
+        let form = app.settings.as_mut().unwrap().form.as_mut().unwrap();
         for c in "Fast".chars() {
             form.name.handle(&key_ev(&Key::ch(c)));
         }
@@ -603,13 +598,8 @@ async fn password_form_and_oauth_overlay_render_without_panic() {
         .iter()
         .position(|p| p == "fastmail")
         .unwrap();
-    app.settings
-        .as_mut()
-        .unwrap()
-        .form
-        .as_mut()
-        .unwrap()
-        .provider_idx = idx;
+    app.settings.as_mut().unwrap().choose_idx = idx;
+    app.choose_provider();
 
     let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
     term.draw(|f| crate::tui::views::draw(f, &app)).unwrap();
@@ -654,7 +644,7 @@ async fn password_form_and_oauth_overlay_render_without_panic() {
     term.draw(|f| crate::tui::views::draw(f, &app)).unwrap();
     let buf = term.backend().buffer().clone();
     let text: String = buf.content().iter().map(|c| c.symbol()).collect();
-    assert!(text.contains("New account"), "form box stays visible above");
+    assert!(text.contains("New Account"), "form box stays visible above");
     assert!(
         text.contains("Authorize gmail"),
         "split panel shows provider"
@@ -704,9 +694,9 @@ async fn account_manager_question_mark_opens_help_window() {
 async fn account_form_field_edit_swallows_question_mark() {
     let mut app = test_app().await;
     send_key!(app, Key::ch('S'));
-    send_key!(app, Key::ch('a')); // new account form (gmail: focus Provider)
-    send_key!(app, Key::ch('j')); // -> Name
-    send_key!(app, Key::ch('e')); // start typing into Name
+    send_key!(app, Key::ch('a')); // new account -> provider chooser
+    send_key!(app, Key::enter()); // pick provider -> form (gmail: focus Name)
+    send_key!(app, Key::ch('e')); // start typing into Name (already focused)
     assert!(app.settings.as_ref().unwrap().field_editing);
     send_key!(app, Key::ch('?')); // must reach the field, not open help
     assert!(!app.help_open);
@@ -821,4 +811,139 @@ async fn apply_oauth_result_uses_real_display_name() {
         .find(|a| a.email == "ada@gmail.com")
         .expect("account saved");
     assert_eq!(acct.name, "Ada Lovelace");
+}
+
+#[tokio::test]
+async fn provider_dropdown_opens_and_selects() {
+    let mut app = test_app().await;
+    // The provider dropdown lives on the edit form; the new-account wizard
+    // picks the provider via the chooser instead. Seed an account and edit it.
+    let acct = Account {
+        id: None,
+        name: "Existing".into(),
+        email: "existing@example.com".into(),
+        provider: "gmail".into(),
+        keychain_ref: "pesan/test/refresh".into(),
+        is_default: true,
+        created_at: 1,
+    };
+    crate::infrastructure::database::accounts::upsert(&app.pool, &acct)
+        .await
+        .unwrap();
+    app.accounts = crate::infrastructure::database::accounts::list(&app.pool)
+        .await
+        .unwrap();
+    send_key!(app, Key::ch('S')); // open the account manager
+    send_key!(app, Key::ch('o')); // edit the selected account -> form
+
+    let settings = app.settings.as_ref().unwrap();
+    assert!(settings.editing);
+    // gmail is OAuth, so the edit form starts on the Provider field.
+    assert_eq!(settings.focus, SettingsFocus::Provider);
+    let n = settings.providers.len();
+    assert!(n > 0, "config must define at least one provider");
+
+    // Edit mode reuses the provider chooser to switch providers. Open it with `o`.
+    send_key!(app, Key::ch('o'));
+    let settings = app.settings.as_ref().unwrap();
+    assert!(settings.choosing_provider, "chooser should open on `o`");
+    assert!(!settings.is_new, "editing keeps is_new false");
+    let before = settings.choose_idx;
+
+    // j/k move the highlighted option in the chooser.
+    if n > 1 {
+        send_key!(app, Key::ch('j'));
+        let after = app.settings.as_ref().unwrap().choose_idx;
+        assert_eq!(after, (before + 1).min(n - 1));
+    }
+
+    // Enter confirms, applies the provider to the form, and returns to editing.
+    send_key!(app, Key::enter());
+    let settings = app.settings.as_ref().unwrap();
+    assert!(!settings.choosing_provider, "chooser should close on Enter");
+    assert_eq!(settings.focus, SettingsFocus::Provider);
+    let form = settings.form.as_ref().unwrap();
+    let chosen = settings.choose_idx;
+    assert_eq!(form.provider_idx, chosen, "selected provider applied to form");
+}
+
+#[tokio::test]
+async fn account_form_hl_moves_focus_left_right() {
+    let mut app = test_app().await;
+    send_key!(app, Key::ch('S'));
+    send_key!(app, Key::ch('a')); // add account -> provider chooser
+    send_key!(app, Key::enter()); // pick provider -> form (focus Name)
+    // New-account OAuth order is a 2-column grid: Name | IsDefault, then Authorize.
+    assert_eq!(app.settings.as_ref().unwrap().focus, SettingsFocus::Name);
+
+    // `l` moves focus to the right column (IsDefault).
+    send_key!(app, Key::ch('l'));
+    assert_eq!(
+        app.settings.as_ref().unwrap().focus,
+        SettingsFocus::IsDefault
+    );
+
+    // `h` moves focus back to the left column (Name).
+    send_key!(app, Key::ch('h'));
+    assert_eq!(app.settings.as_ref().unwrap().focus, SettingsFocus::Name);
+
+    // `h` on the leftmost column is a no-op (stays on Name).
+    send_key!(app, Key::ch('h'));
+    assert_eq!(app.settings.as_ref().unwrap().focus, SettingsFocus::Name);
+
+    // `l` from the rightmost (IsDefault) is a no-op too.
+    send_key!(app, Key::ch('l'));
+    send_key!(app, Key::ch('l'));
+    assert_eq!(
+        app.settings.as_ref().unwrap().focus,
+        SettingsFocus::IsDefault
+    );
+}
+
+#[tokio::test]
+async fn edit_account_can_switch_provider_and_persists() {
+    let mut app = test_app().await;
+    let acct = Account {
+        id: None,
+        name: "Existing".into(),
+        email: "existing@example.com".into(),
+        provider: "gmail".into(),
+        keychain_ref: "pesan/test/refresh".into(),
+        is_default: true,
+        created_at: 1,
+    };
+    crate::infrastructure::database::accounts::upsert(&app.pool, &acct)
+        .await
+        .unwrap();
+    app.accounts = crate::infrastructure::database::accounts::list(&app.pool)
+        .await
+        .unwrap();
+    // Need at least two providers to switch between.
+    let n = app.settings.as_ref().map(|s| s.providers.len()).unwrap_or(0);
+    if n < 2 {
+        return;
+    }
+    let other = app.settings.as_ref().unwrap().providers[1].clone();
+    if other == "gmail" {
+        return;
+    }
+
+    send_key!(app, Key::ch('S')); // open the account manager
+    send_key!(app, Key::ch('o')); // edit the selected account -> form (focus Provider)
+    // Open the chooser and pick the second provider.
+    send_key!(app, Key::ch('o'));
+    assert!(app.settings.as_ref().unwrap().choosing_provider);
+    send_key!(app, Key::ch('j')); // move to the second provider
+    send_key!(app, Key::enter()); // confirm
+    let form = app.settings.as_ref().unwrap().form.as_ref().unwrap();
+    assert_eq!(form.provider_idx, 1, "provider switched in the form");
+    assert!(!app.settings.as_ref().unwrap().choosing_provider);
+
+    // Save (Shift+W) and confirm the row persisted the new provider.
+    send_key!(app, Key::ch('W'));
+    let saved = crate::infrastructure::database::accounts::list(&app.pool)
+        .await
+        .unwrap();
+    let updated = saved.iter().find(|a| a.email == "existing@example.com").unwrap();
+    assert_eq!(updated.provider, other, "switched provider persisted");
 }

@@ -17,16 +17,16 @@ async fn shift_s_with_shift_modifier_opens_settings() {
 async fn account_form_field_is_modal_e_edits_esc_exits() {
     let mut app = test_app().await;
     send_key!(app, Key::ch('S'));
-    send_key!(app, Key::ch('a')); // add account -> form (gmail: focus Provider)
-    // j/k move between fields (not Tab). OAuth order: Provider -> Name -> ...
-    send_key!(app, Key::ch('j'));
+    send_key!(app, Key::ch('a')); // add account -> provider chooser
+    send_key!(app, Key::enter()); // pick provider -> form (gmail: focus Name)
+    // j/k move between fields (not Tab). New-account OAuth order: Name -> Default -> Authorize.
     assert_eq!(app.settings.as_ref().unwrap().focus, SettingsFocus::Name);
-    send_key!(app, Key::ch('k'));
+    send_key!(app, Key::ch('j'));
     assert_eq!(
         app.settings.as_ref().unwrap().focus,
-        SettingsFocus::Provider
+        SettingsFocus::IsDefault
     );
-    send_key!(app, Key::ch('j')); // back to Name for the modal-edit checks
+    send_key!(app, Key::ch('k'));
     assert_eq!(app.settings.as_ref().unwrap().focus, SettingsFocus::Name);
     // Not editing yet: a letter must NOT reach the field.
     send_key!(app, Key::ch('z'));
@@ -93,17 +93,13 @@ async fn account_form_field_is_modal_e_edits_esc_exits() {
 async fn settings_form_accepts_typed_input_through_keys() {
     let mut app = test_app().await;
     send_key!(app, Key::ch('S')); // open settings
-    send_key!(app, Key::ch('a')); // add account -> editing
+    send_key!(app, Key::ch('a')); // add account -> provider chooser
+    send_key!(app, Key::enter()); // pick provider -> editing
     assert!(app.settings.as_ref().unwrap().editing);
-    // gmail is an OAuth provider, so the form starts on Provider (email is
-    // auto-filled by OAuth, not typed).
-    assert_eq!(
-        app.settings.as_ref().unwrap().focus,
-        SettingsFocus::Provider
-    );
-    // j moves to the Name field; fields are modal: `e` starts typing.
-    send_key!(app, Key::ch('j'));
+    // gmail is an OAuth provider; in the new-account wizard the form starts on
+    // Name (the provider was chosen on the chooser; email is auto-filled).
     assert_eq!(app.settings.as_ref().unwrap().focus, SettingsFocus::Name);
+    // fields are modal: `e` starts typing on the focused Name field.
     send_key!(app, Key::ch('e'));
     assert!(app.settings.as_ref().unwrap().field_editing);
     for c in "Work".chars() {
@@ -293,6 +289,7 @@ async fn settings_save_creates_account() {
     send_key!(app, Key::ch('S'));
     // a to add account
     send_key!(app, Key::ch('a'));
+    send_key!(app, Key::enter()); // pick provider -> form
     assert!(app.settings.as_ref().unwrap().is_new);
     assert!(app.settings.as_ref().unwrap().editing);
     // fill name + email

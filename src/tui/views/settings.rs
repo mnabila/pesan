@@ -1,4 +1,21 @@
 use super::*;
+use ratatui::style::{Color, Style};
+
+/// A filled chip: ` label ` with `fill` background over the theme bg text color.
+/// Used for status pills and provider/default badges so the account UI reads at a
+/// glance while staying themeable (no per-provider colors).
+fn pill(label: &str, fill: Color, text: Color) -> Span<'static> {
+    Span::styled(format!(" {label} "), Style::new().bg(fill).fg(text))
+}
+
+/// Capitalize the first character of `s` for a tidy provider badge.
+fn capitalize(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+        None => String::new(),
+    }
+}
 
 pub(super) fn draw_settings(frame: &mut Frame, body: Rect, app: &App) {
     let Some(state) = &app.settings else { return };
@@ -19,28 +36,53 @@ pub(super) fn draw_settings(frame: &mut Frame, body: Rect, app: &App) {
     let (form_area, paste_split) = match app.oauth_paste.as_ref() {
         Some(paste) if app.oauth_paste_inline() => {
             let [top, bottom] =
-                Layout::vertical([Constraint::Min(5), Constraint::Length(9)]).areas(accounts_area);
+                Layout::vertical([Constraint::Min(5), Constraint::Length(11)]).areas(accounts_area);
             (top, Some((bottom, paste)))
         }
         _ => (accounts_area, None),
     };
 
-    let a_title = if state.editing {
+    let a_title: String = if state.choosing_provider {
         if state.is_new {
-            " New account "
+            " New account - choose provider ".into()
         } else {
-            " Edit account "
+            " Edit account - choose provider ".into()
+        }
+    } else if state.editing {
+        if state.is_new {
+            // Once a provider is chosen, name it in the title (e.g.
+            // "New Account - Gmail") so the form's context is clear.
+            let provider = state
+                .form
+                .as_ref()
+                .and_then(|f| state.providers.get(f.provider_idx))
+                .map(|p| capitalize(p))
+                .unwrap_or_else(|| "Provider".to_string());
+            format!(" New Account - {provider} ")
+        } else {
+            " Edit account ".into()
         }
     } else {
-        " Accounts "
+        " Accounts ".into()
     };
+
     let acc_block = Block::bordered()
         .border_type(skin.border)
         .title(Line::from(Span::styled(a_title, skin.theme.dim_style())))
         .border_style(skin.border_style(true));
+
     let acc_inner = acc_block.inner(form_area);
+
     frame.render_widget(acc_block, form_area);
-    if state.editing {
+
+    if state.choosing_provider {
+        render_provider_chooser(
+            frame,
+            acc_inner,
+            &provider_chooser_props(app, state.choose_idx),
+            &skin,
+        );
+    } else if state.editing {
         render_account_form(frame, acc_inner, &account_form_props(app), &skin);
     } else {
         render_account_list(frame, acc_inner, &account_list_props(app), &skin);
@@ -70,7 +112,126 @@ fn render_oauth_paste_split(
         .border_style(skin.border_style(true));
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    render_oauth_paste_body(frame, inner, paste, skin.theme);
+    render_oauth_paste_body(frame, inner, paste, skin.theme, skin.border);
+}
+
+// Provider chooser (new-account step 1) --------------------------------
+
+/// One provider offered on the chooser screen.
+struct ProviderChoice {
+    name: String,
+    oauth: bool,
+    host: String,
+    selected: bool,
+}
+
+/// Plain-data view model for the provider chooser.
+struct ProviderChooserProps {
+    choices: Vec<ProviderChoice>,
+}
+
+fn provider_chooser_props(app: &App, selected_idx: usize) -> ProviderChooserProps {
+    let Some(state) = &app.settings else {
+        return ProviderChooserProps {
+            choices: Vec::new(),
+        };
+    };
+    let choices = state
+        .providers
+        .iter()
+        .enumerate()
+        .map(|(i, key)| {
+            let p = app.config.providers.get(key);
+            let oauth = p.map(|p| p.is_oauth()).unwrap_or(true);
+            let host = p.map(|p| p.imap.host.clone()).unwrap_or_default();
+            ProviderChoice {
+                name: capitalize(key),
+                oauth,
+                host,
+                selected: i == selected_idx,
+            }
+        })
+        .collect();
+    ProviderChooserProps { choices }
+}
+
+/// Draw the provider chooser as a vertical stack of selectable cards, each
+/// showing the provider name, an auth-kind badge (OAuth2 / Password), and the
+/// IMAP host as a hint. The selected card gets the accent border + highlight.
+fn render_provider_chooser(frame: &mut Frame, area: Rect, p: &ProviderChooserProps, skin: &Skin) {
+    let mut y = area.y;
+    for c in &p.choices {
+        let h = 3u16;
+        if y + h > area.y + area.height {
+            break;
+        }
+        let rect = Rect {
+            x: area.x,
+            y,
+            width: area.width,
+            height: h,
+        };
+        let bstyle = if c.selected {
+            skin.theme.accent_style()
+        } else {
+            skin.theme.dim_style()
+        };
+        let block = Block::bordered()
+            .border_type(skin.border)
+            .border_style(bstyle);
+        let inner = block.inner(rect);
+        frame.render_widget(block, rect);
+
+        let auth_label = if c.oauth {
+            format!("{} OAuth2", skin.glyphs.ok)
+        } else {
+            format!("{} Password", skin.glyphs.flagged)
+        };
+        let auth_fill = if c.oauth {
+            skin.theme.accent
+        } else {
+            skin.theme.warning
+        };
+        let name_style = if c.selected {
+            skin.theme.fg_style().add_modifier(Modifier::BOLD)
+        } else {
+            skin.theme.fg_style()
+        };
+        let line1 = Line::from(vec![
+            Span::styled(format!(" {:<14}", c.name), name_style),
+            pill(&auth_label, auth_fill, skin.theme.bg),
+        ]);
+        let hint_w = (inner.width as usize).saturating_sub(2);
+        let line2 = Line::from(Span::styled(
+            format!(" {:<hint_w$}", c.host, hint_w = hint_w),
+            skin.theme.dim_style(),
+        ));
+        let [l1, l2, _] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(0),
+        ])
+        .areas(inner);
+        frame.render_widget(Paragraph::new(line1), l1);
+        frame.render_widget(Paragraph::new(line2), l2);
+        y += h;
+    }
+    // Footer hint once the cards are drawn.
+    if y < area.y + area.height {
+        let hint = Line::from(Span::styled(
+            " j/k move   Enter select   Esc cancel ",
+            skin.theme.dim_style(),
+        ));
+        frame.render_widget(
+            Paragraph::new(hint),
+            Rect {
+                x: area.x,
+                y,
+                width: area.width,
+                height: 1,
+            },
+        );
+    }
 }
 
 // Account list ---------------------------------------------------------
@@ -152,71 +313,101 @@ fn render_account_list(frame: &mut Frame, area: Rect, p: &AccountListProps, skin
     // A live filter bar occupies the pane's bottom row once filtering starts;
     // it persists while a query narrows the list, matching the other sections.
     let (list_area, filter_bar) = if p.filtering {
-        let [list, bar] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
+        let [list, bar] = Layout::vertical([Constraint::Min(0), Constraint::Length(3)]).areas(area);
         (list, Some(bar))
     } else {
         (area, None)
     };
-    let width = list_area.width as usize;
-    let (name_w, email_w) = account_cols(width);
-    let provider_w = 12usize;
-    let col = |s: &str, w: usize| format!("{:<w$}", truncate(s, w.saturating_sub(1)), w = w);
 
-    let mut lines: Vec<Line> = vec![Line::from(Span::styled(
-        format!(
-            "  {}{}{}{}",
-            col("ACCOUNT", name_w),
-            col("EMAIL", email_w),
-            col("PROVIDER", provider_w),
-            "STATUS"
-        ),
-        skin.theme.dim_style(),
-    ))];
-
+    // Empty states keep the plain-text hint (no table needed).
     if p.accounts_empty {
-        lines.push(Line::raw(""));
-        lines.push(Line::from(Span::styled(
-            "  No accounts yet - press  a  to add one.",
-            skin.theme.dim_style(),
-        )));
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "  No accounts yet - press  a  to add one.",
+                skin.theme.dim_style(),
+            )))
+            .style(skin.theme.fg_style()),
+            list_area,
+        );
     } else if p.rows.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "  No accounts match the filter.",
-            skin.theme.dim_style(),
-        )));
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "  No accounts match the filter.",
+                skin.theme.dim_style(),
+            )))
+            .style(skin.theme.fg_style()),
+            list_area,
+        );
+    } else {
+        // Column widths: name/email absorb the slack (the cursor column is added
+        // automatically by `highlight_symbol`), provider is fixed, status flexes.
+        let width = list_area.width as usize;
+        let (name_w, email_w) = account_cols(width);
+        let provider_w = 12u16;
+        let status_w = width
+            .saturating_sub(2 + name_w + email_w + provider_w as usize)
+            .max(1);
+        let widths = [
+            Constraint::Length(name_w as u16),
+            Constraint::Min(email_w as u16),
+            Constraint::Length(provider_w),
+            Constraint::Min(status_w as u16),
+        ];
+
+        let header = Row::new(vec![
+            Cell::from("ACCOUNT"),
+            Cell::from("EMAIL"),
+            Cell::from("PROVIDER"),
+            Cell::from("STATUS"),
+        ])
+        .style(skin.theme.dim_style());
+
+        let rows: Vec<Row> = p
+            .rows
+            .iter()
+            .map(|r| {
+                let provider_badge = capitalize(&r.provider);
+                let mut status_spans: Vec<Span<'static>> = if r.connected {
+                    vec![pill(
+                        &format!("{} connected", skin.glyphs.ok),
+                        skin.theme.success,
+                        skin.theme.bg,
+                    )]
+                } else {
+                    vec![pill(
+                        &format!("{} needs auth", skin.glyphs.warning),
+                        skin.theme.warning,
+                        skin.theme.bg,
+                    )]
+                };
+                if r.is_default {
+                    status_spans.push(Span::raw(" "));
+                    status_spans.push(pill("default", skin.theme.accent, skin.theme.bg));
+                }
+                Row::new(vec![
+                    Cell::from(r.name.clone()),
+                    Cell::from(r.email.clone()),
+                    Cell::from(Line::from(pill(&provider_badge, skin.theme.accent, skin.theme.bg))),
+                    Cell::from(Line::from(status_spans)),
+                ])
+            })
+            .collect();
+
+        // Drive the row highlight + cursor arrow through the table's selection.
+        let selected = p.rows.iter().position(|r| r.selected);
+        let mut table_state = TableState::default();
+        if let Some(i) = selected {
+            table_state.select(Some(i));
+        }
+
+        let table = Table::new(rows, widths)
+            .header(header)
+            .column_spacing(1)
+            .highlight_symbol("▸ ")
+            .row_highlight_style(skin.theme.selected_style());
+        frame.render_stateful_widget(table, list_area, &mut table_state);
     }
 
-    for r in &p.rows {
-        let status = if r.connected {
-            format!("{} connected", skin.glyphs.ok)
-        } else {
-            format!("{} needs auth", skin.glyphs.warning)
-        };
-        let default = if r.is_default {
-            format!("  {} default", skin.glyphs.flagged)
-        } else {
-            String::new()
-        };
-        let cursor = if r.selected { "▸ " } else { "  " };
-        let text = format!(
-            "{cursor}{}{}{}{status}{default}",
-            col(&r.name, name_w),
-            col(&r.email, email_w),
-            col(&r.provider, provider_w),
-        );
-        if r.selected {
-            lines.push(Line::from(Span::styled(
-                format!("{text:<width$}"),
-                skin.theme.selected_style(),
-            )));
-        } else {
-            lines.push(Line::from(Span::styled(text, skin.theme.fg_style())));
-        }
-    }
-    frame.render_widget(
-        Paragraph::new(lines).style(skin.theme.fg_style()),
-        list_area,
-    );
     if let Some(bar) = filter_bar {
         render_filter_bar(frame, bar, skin, &p.filter, p.filtering);
     }
@@ -233,7 +424,9 @@ enum FormRow {
         value: String,
     },
     Blank,
-    /// The provider selector: "‹ gmail ›" (ASCII brackets per `ui.ascii`).
+    /// The provider selector. Shown only when editing an existing account (the
+    /// new-account wizard already chose the provider on the chooser screen and
+    /// names it in the title). Enter/`o` re-opens the chooser to switch it.
     Provider {
         value: String,
         focused: bool,
@@ -277,6 +470,9 @@ fn account_form_props(app: &App) -> AccountFormProps {
         .get(form.provider_idx)
         .cloned()
         .unwrap_or_else(|| "gmail".to_string());
+    // In the new-account wizard the provider was already chosen on the chooser
+    // screen, so the form shows it as a read-only badge instead of a dropdown.
+    let new_wizard = state.is_new && !state.choosing_provider;
     let mut p = AccountFormProps::default();
 
     // Read-only detail block for an existing account (the `o`-opened view).
@@ -312,10 +508,6 @@ fn account_form_props(app: &App) -> AccountFormProps {
     };
 
     if is_oauth {
-        p.rows.push(FormRow::Provider {
-            value: provider_name.clone(),
-            focused: state.focus == SettingsFocus::Provider,
-        });
         // Name is optional for OAuth: blank auto-fills from the provider's real
         // display name after authorizing. The placeholder makes that clear.
         p.rows.push(FormRow::Field(form::FormField::new(
@@ -329,6 +521,15 @@ fn account_form_props(app: &App) -> AccountFormProps {
         p.rows.push(FormRow::EmailValue(
             (!form.email.text().is_empty()).then(|| form.email.text().to_string()),
         ));
+        // The provider is named in the form title (chosen on the chooser), so it
+        // is not repeated as a field here; it stays editable only when editing
+        // an existing account.
+        if !new_wizard {
+            p.rows.push(FormRow::Provider {
+                value: provider_name.clone(),
+                focused: state.focus == SettingsFocus::Provider,
+            });
+        }
     } else {
         p.rows.push(FormRow::Field(field(
             "Name",
@@ -340,10 +541,15 @@ fn account_form_props(app: &App) -> AccountFormProps {
             &form.email,
             SettingsFocus::Email,
         )));
-        p.rows.push(FormRow::Provider {
-            value: provider_name.clone(),
-            focused: state.focus == SettingsFocus::Provider,
-        });
+        // The provider is named in the form title (chosen on the chooser), so it
+        // is not repeated as a field here; it stays editable only when editing
+        // an existing account.
+        if !new_wizard {
+            p.rows.push(FormRow::Provider {
+                value: provider_name.clone(),
+                focused: state.focus == SettingsFocus::Provider,
+            });
+        }
         // Password is masked (never rendered in clear text).
         p.rows.push(FormRow::Password {
             chars: form.password.text().chars().count(),
@@ -375,126 +581,254 @@ fn account_form_props(app: &App) -> AccountFormProps {
     p
 }
 
+/// Draw a single-line value inside a bordered box titled `title` (pass `None`
+/// for an untitled box, e.g. a button). The border highlights in the accent
+/// color when `focused`. The caller renders the inner content via `draw`, so
+/// the provider/password/toggle/button rows match the boxed text-field style.
+fn render_boxed(
+    frame: &mut Frame,
+    area: Rect,
+    title: Option<&str>,
+    focused: bool,
+    skin: &Skin,
+    draw: impl FnOnce(&mut Frame, Rect),
+) {
+    let bstyle = if focused {
+        skin.theme.accent_style()
+    } else {
+        skin.theme.dim_style()
+    };
+    let mut block = Block::bordered()
+        .border_type(skin.border)
+        .border_style(bstyle);
+    if let Some(t) = title {
+        block = block.title(Span::styled(t.to_string(), bstyle));
+    }
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    draw(frame, inner);
+}
+
+/// Left-aligned, dim/accent field label shared by the read-only header rows
+/// (mirrors the inline "From" label on the compose screen).
+fn field_label(text: &str, focused: bool, skin: &Skin) -> Span<'static> {
+    Span::styled(
+        format!("{text:<9}"),
+        if focused {
+            skin.theme.accent_style()
+        } else {
+            skin.theme.dim_style()
+        },
+    )
+}
+
+/// Draw a read-only (non-boxed) header row: Details and the OAuth email hint.
+fn render_header_row(frame: &mut Frame, r: Rect, row: &FormRow, skin: &Skin) {
+    match row {
+        FormRow::Blank => {}
+        FormRow::Detail { label, value } => {
+            let value_span = if label == "Status" {
+                if value == "connected" {
+                    pill(
+                        &format!("{} connected", skin.glyphs.ok),
+                        skin.theme.success,
+                        skin.theme.bg,
+                    )
+                } else {
+                    pill(
+                        &format!("{} needs auth", skin.glyphs.warning),
+                        skin.theme.warning,
+                        skin.theme.bg,
+                    )
+                }
+            } else {
+                Span::styled(value.clone(), skin.theme.fg_style())
+            };
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(format!("{:<9}", label), skin.theme.dim_style()),
+                    Span::raw(" "),
+                    value_span,
+                ]))
+                .style(skin.theme.fg_style()),
+                r,
+            );
+        }
+        FormRow::EmailValue(value) => {
+            let shown = match value {
+                Some(v) => Span::styled(v.clone(), skin.theme.fg_style()),
+                None => Span::styled("(filled after authorizing)", skin.theme.dim_style()),
+            };
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    field_label("Email", false, skin),
+                    Span::raw(" "),
+                    shown,
+                ]))
+                .style(skin.theme.fg_style()),
+                r,
+            );
+        }
+        _ => {}
+    }
+}
+
+/// Draw one bordered control box (text field, provider, password, toggle, or
+/// action button) into its 3-row cell.
+fn render_box_row(frame: &mut Frame, r: Rect, row: &FormRow, skin: &Skin) {
+    match row {
+        FormRow::Field(f) => {
+            form::render_field_box(frame, r, f, skin.theme, skin.border);
+        }
+        FormRow::Provider { value, focused } => {
+            let style = if *focused {
+                skin.theme.fg_style().add_modifier(Modifier::BOLD)
+            } else {
+                skin.theme.fg_style()
+            };
+            // Provider shown as an accent badge; Enter/`o` re-opens the chooser
+            // to switch it, so hint at that with a small affordance.
+            let badge = pill(value, skin.theme.accent, skin.theme.bg);
+            let hint = if *focused {
+                Span::styled(" enter↩", skin.theme.dim_style())
+            } else {
+                Span::raw("")
+            };
+            let val = Line::from(vec![badge, hint]);
+            render_boxed(frame, r, Some("Provider"), *focused, skin, |f, area| {
+                f.render_widget(Paragraph::new(val).style(style), area);
+            });
+        }
+        FormRow::Password {
+            chars,
+            focused,
+            editing,
+        } => {
+            // Masked (never rendered in clear text).
+            let dots = "•".repeat(*chars);
+            let shown = if dots.is_empty() {
+                Span::styled("(enter password)", skin.theme.dim_style())
+            } else if *focused && *editing {
+                Span::styled(format!("{dots}▏"), skin.theme.fg_style())
+            } else {
+                Span::styled(dots, skin.theme.fg_style())
+            };
+            render_boxed(frame, r, Some("Password"), *focused, skin, |f, area| {
+                f.render_widget(
+                    Paragraph::new(Line::from(shown)).style(skin.theme.fg_style()),
+                    area,
+                );
+            });
+        }
+        FormRow::Toggle { on, focused } => {
+            let mark = if *on { "yes" } else { "no" };
+            let fill = if *on {
+                skin.theme.success
+            } else {
+                skin.theme.dim
+            };
+            render_boxed(frame, r, Some("Default"), *focused, skin, |f, area| {
+                f.render_widget(
+                    Paragraph::new(Line::from(pill(mark, fill, skin.theme.bg)))
+                        .style(skin.theme.fg_style()),
+                    area,
+                );
+            });
+        }
+        FormRow::Button { text, focused } => {
+            let style = if *focused {
+                skin.theme.selected_style()
+            } else {
+                skin.theme.accent_style()
+            };
+            // A plain, centered label (the `[ … ]` brackets already mark it as
+            // the action) - no surrounding border box.
+            let [_, btn_area, _] =
+                Layout::vertical([Constraint::Min(0), Constraint::Length(1), Constraint::Min(0)])
+                    .areas(r);
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(text.clone(), style)))
+                    .style(skin.theme.fg_style())
+                    .alignment(ratatui::layout::Alignment::Center),
+                btn_area,
+            );
+        }
+        _ => {}
+    }
+}
+
 fn render_account_form(frame: &mut Frame, area: Rect, p: &AccountFormProps, skin: &Skin) {
     if p.rows.is_empty() {
         return;
     }
 
-    // One rect per row so live text inputs can draw over their own line
-    // without the old index-bookkeeping overlay list.
-    let rects = Layout::vertical(vec![Constraint::Length(1); p.rows.len()]).split(area);
-    let field_label = |text: &str, focused: bool| -> Span<'static> {
-        Span::styled(
-            format!("{text:<9}"),
-            if focused {
-                skin.theme.accent_style()
-            } else {
-                skin.theme.dim_style()
-            },
-        )
-    };
-
-    for (i, row) in p.rows.iter().enumerate() {
-        let r = rects[i];
+    // Group rows into a read-only header (Detail/Email lines, like compose's
+    // "From" line), a 2-column grid of bordered boxes (matching compose), and a
+    // full-width trailing action button.
+    let mut header: Vec<&FormRow> = Vec::new();
+    let mut boxes: Vec<&FormRow> = Vec::new();
+    let mut button: Option<&FormRow> = None;
+    for row in &p.rows {
         match row {
-            FormRow::Blank => {}
-            FormRow::Detail { label, value } => frame.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled(format!("{:<9}", label), skin.theme.dim_style()),
-                    Span::raw(" "),
-                    Span::styled(value.clone(), skin.theme.fg_style()),
-                ]))
-                .style(skin.theme.fg_style()),
-                r,
-            ),
-            FormRow::Provider { value, focused } => {
-                let (popen, pclose) = if skin.ascii {
-                    ("< ", " >")
+            FormRow::Field(_)
+            | FormRow::Provider { .. }
+            | FormRow::Password { .. }
+            | FormRow::Toggle { .. } => boxes.push(row),
+            FormRow::Button { .. } => button = Some(row),
+            _ => header.push(row),
+        }
+    }
+
+    let grid_rows = (boxes.len() + 1) / 2;
+    let mut constraints: Vec<Constraint> = header.iter().map(|_| Constraint::Length(1)).collect();
+    if grid_rows > 0 {
+        constraints.push(Constraint::Length((3 * grid_rows) as u16));
+    }
+    if button.is_some() {
+        constraints.push(Constraint::Length(3));
+    }
+    let rects = Layout::vertical(&constraints).split(area);
+
+    let mut idx = 0;
+    for row in &header {
+        render_header_row(frame, rects[idx], row, skin);
+        idx += 1;
+    }
+    let grid_area = if grid_rows > 0 {
+        let a = rects[idx];
+        idx += 1;
+        Some(a)
+    } else {
+        None
+    };
+    let button_area = button.map(|_| {
+        let a = rects[idx];
+        idx += 1;
+        a
+    });
+
+        // Lay the boxed controls out as a 2-column grid, like compose's header rows.
+        if let Some(grid_area) = grid_area {
+            let [left, _gap, right] = Layout::horizontal([
+                Constraint::Ratio(1, 2),
+                Constraint::Length(1),
+                Constraint::Ratio(1, 2),
+            ])
+            .areas(grid_area);
+            let left_rects = Layout::vertical(vec![Constraint::Length(3); grid_rows]).split(left);
+            let right_rects = Layout::vertical(vec![Constraint::Length(3); grid_rows]).split(right);
+            for (i, row) in boxes.iter().enumerate() {
+                let r = if i % 2 == 0 {
+                    left_rects[i / 2]
                 } else {
-                    ("‹ ", " ›")
+                    right_rects[i / 2]
                 };
-                let style = if *focused {
-                    skin.theme.fg_style().add_modifier(Modifier::BOLD)
-                } else {
-                    skin.theme.fg_style()
-                };
-                frame.render_widget(
-                    Paragraph::new(Line::from(vec![
-                        field_label("Provider", *focused),
-                        Span::raw(" "),
-                        Span::styled(format!("{popen}{value}{pclose}"), style),
-                    ]))
-                    .style(skin.theme.fg_style()),
-                    r,
-                );
-            }
-            FormRow::Field(f) => {
-                form::render_field_row(frame, r, f, skin.theme, 10, false);
-            }
-            FormRow::EmailValue(value) => {
-                let shown = match value {
-                    Some(v) => Span::styled(v.clone(), skin.theme.fg_style()),
-                    None => Span::styled("(filled after authorizing)", skin.theme.dim_style()),
-                };
-                frame.render_widget(
-                    Paragraph::new(Line::from(vec![
-                        field_label("Email", false),
-                        Span::raw(" "),
-                        shown,
-                    ]))
-                    .style(skin.theme.fg_style()),
-                    r,
-                );
-            }
-            FormRow::Password {
-                chars,
-                focused,
-                editing,
-            } => {
-                // Masked (never rendered in clear text).
-                let dots = "•".repeat(*chars);
-                let shown = if dots.is_empty() {
-                    Span::styled("(enter password)", skin.theme.dim_style())
-                } else if *focused && *editing {
-                    Span::styled(format!("{dots}▏"), skin.theme.fg_style())
-                } else {
-                    Span::styled(dots, skin.theme.fg_style())
-                };
-                frame.render_widget(
-                    Paragraph::new(Line::from(vec![
-                        field_label("Password", *focused),
-                        Span::raw(" "),
-                        shown,
-                    ]))
-                    .style(skin.theme.fg_style()),
-                    r,
-                );
-            }
-            FormRow::Toggle { on, focused } => {
-                let mark = if *on { "yes" } else { "no" };
-                frame.render_widget(
-                    Paragraph::new(Line::from(vec![
-                        field_label("Default", *focused),
-                        Span::raw(" "),
-                        Span::styled(mark, skin.theme.fg_style()),
-                    ]))
-                    .style(skin.theme.fg_style()),
-                    r,
-                );
-            }
-            FormRow::Button { text, focused } => {
-                let style = if *focused {
-                    skin.theme.selected_style()
-                } else {
-                    skin.theme.accent_style()
-                };
-                frame.render_widget(
-                    Paragraph::new(Line::from(vec![Span::styled(text.clone(), style)]))
-                        .style(skin.theme.fg_style()),
-                    r,
-                );
+                render_box_row(frame, r, row, skin);
             }
         }
+
+    if let (Some(area), Some(row)) = (button_area, button) {
+        render_box_row(frame, area, row, skin);
     }
 }
 

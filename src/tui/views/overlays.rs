@@ -134,9 +134,9 @@ pub(super) fn push_settings_help(lines: &mut Vec<Line<'static>>, app: &App) {
 
     lines.push(Line::raw(""));
     title(lines, "account form");
-    row(lines, "j / k", "move field");
+    row(lines, "j / k", "move field (down/up)");
+    row(lines, "h / l", "move field (left/right)");
     row(lines, "e / Enter", "edit field");
-    row(lines, "h / l", "change provider");
     row(lines, "Space", "toggle default");
     row(lines, "Enter", "authorize / save");
     row(lines, "Esc", "cancel field / back");
@@ -228,7 +228,7 @@ fn render_oauth_paste(frame: &mut Frame, app: &App, paste: &crate::tui::app::OAu
     let provider = paste.req.account.provider.as_str();
     let area = frame.area();
     let w = (72u16).min(area.width.saturating_sub(6)).max(20);
-    let h = 9;
+    let h = 11;
     let x = area.x + (area.width.saturating_sub(w)) / 2;
     let y = area.y + area.height.saturating_sub(h).max(2) / 2;
     let rect = Rect {
@@ -247,7 +247,7 @@ fn render_oauth_paste(frame: &mut Frame, app: &App, paste: &crate::tui::app::OAu
         .border_style(app.theme.border_style(true));
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
-    render_oauth_paste_body(frame, inner, paste, &app.theme);
+    render_oauth_paste_body(frame, inner, paste, &app.theme, app.border_type());
 }
 
 /// Render the redirect-paste instructions + input into `inner`. Shared by the
@@ -258,19 +258,20 @@ pub(super) fn render_oauth_paste_body(
     inner: Rect,
     paste: &crate::tui::app::OAuthPaste,
     theme: &crate::tui::theme::Theme,
+    border_type: ratatui::widgets::BorderType,
 ) {
     if inner.height == 0 {
         return;
     }
-    // Split: instructions (top) / input row (bottom line).
-    let input_row = Rect {
+    // Split: instructions (top) / a bordered box for the pasted URL (bottom).
+    let box_area = Rect {
         x: inner.x,
-        y: inner.y + inner.height.saturating_sub(1),
+        y: inner.y + inner.height.saturating_sub(3),
         width: inner.width,
-        height: 1,
+        height: 3,
     };
     let text_area = Rect {
-        height: inner.height.saturating_sub(2),
+        height: inner.height.saturating_sub(4),
         ..inner
     };
     let lines = vec![
@@ -295,9 +296,15 @@ pub(super) fn render_oauth_paste_body(
             .wrap(ratatui::widgets::Wrap { trim: true }),
         text_area,
     );
+    let block = Block::bordered()
+        .border_type(border_type)
+        .border_style(theme.accent_style())
+        .title(Span::styled("Redirect URL", theme.accent_style()));
+    let input_area = block.inner(box_area);
+    frame.render_widget(block, box_area);
     crate::tui::widgets::input::render_input(
         frame,
-        input_row,
+        input_area,
         &paste.input,
         theme,
         Some("paste here, or Esc to cancel"),
@@ -402,6 +409,40 @@ pub(super) fn render_jobs(frame: &mut Frame, app: &App) {
             .column_spacing(1)
             .block(Block::default());
         frame.render_widget(table, table_area);
+
+        // Overlay a ratatui `Gauge` on the progress column of every job that
+        // reports determinate progress. The column x-range is the same one the
+        // `Table` laid out (same constraints + spacing), so the gauge lands
+        // exactly over the blank progress cells above.
+        let [_, _, _, progress_col, _] =
+            Layout::horizontal(jobs_widths(table_area.width))
+                .spacing(1)
+                .areas(table_area);
+        for (i, job) in app.jobs.iter().enumerate() {
+            let Some((done, total)) = job.progress else {
+                continue;
+            };
+            let y = table_area.y + 1 + i as u16; // header occupies row 0
+            if y >= table_area.y + table_area.height {
+                break;
+            }
+            let gauge_area = Rect {
+                x: progress_col.x,
+                y,
+                width: progress_col.width,
+                height: 1,
+            };
+            let ratio = if total == 0 {
+                0.0
+            } else {
+                done as f64 / total as f64
+            };
+            let gauge = Gauge::default()
+                .ratio(ratio)
+                .label(format!("{done}/{total}"))
+                .gauge_style(app.theme.accent_style());
+            frame.render_widget(gauge, gauge_area);
+        }
     }
 
     frame.render_widget(
@@ -452,13 +493,9 @@ fn job_row(job: &crate::tui::app::Job, app: &App) -> Row<'static> {
             app.theme.error_style(),
         ),
         _ => match job.progress {
-            Some((done, total)) => (
-                format!(
-                    "{} {done}/{total}",
-                    super::main_view::progress_bar(done, total, 10, app.config.ui.ascii)
-                ),
-                app.theme.fg_style(),
-            ),
+            // A ratatui `Gauge` is overlaid on this column by `render_jobs`,
+            // so leave the cell blank here to avoid drawing over the gauge.
+            Some(_) => ("".to_string(), app.theme.fg_style()),
             None => (
                 match job.state {
                     JobState::Done => "done".to_string(),
@@ -491,15 +528,16 @@ pub(super) fn render_search(frame: &mut Frame, app: &App) {
     let Some(search) = &app.search else { return };
     let area = frame.area();
 
-    // Anchor the search bar to the bottom row inside the inbox (message list)
-    // pane, spanning its inner width. If the list pane isn't visible (narrow
-    // mode on folders/reader), fall back to a centered bar near the top.
+    // Anchor the search bar to the bottom of the inbox (message list) pane,
+    // spanning its inner width as a bordered box. If the list pane isn't
+    // visible (narrow mode on folders/reader), fall back to a centered box
+    // near the top.
     let rect = if let Some(list) = message_list_rect(area, app) {
         Rect {
             x: list.x + 1,
-            y: list.y + list.height.saturating_sub(2),
+            y: list.y + list.height.saturating_sub(4),
             width: list.width.saturating_sub(2),
-            height: 1,
+            height: 3,
         }
     } else {
         let w = (70u16).min(area.width.saturating_sub(8));
@@ -507,34 +545,20 @@ pub(super) fn render_search(frame: &mut Frame, app: &App) {
             x: area.x + (area.width - w) / 2,
             y: area.y + 1,
             width: w,
-            height: 1,
+            height: 3,
         }
     };
 
     frame.render_widget(Clear, rect);
     let mut input = search.input.clone();
     input.focus(true);
-    // label + input
-    let label_w = 8u16;
-    let input_area = Rect {
-        x: rect.x + label_w,
-        y: rect.y,
-        width: rect.width.saturating_sub(label_w),
-        height: 1,
-    };
-    let label = Line::from(vec![
-        Span::styled(" search ", app.theme.accent_style()),
-        Span::raw(" "),
-    ]);
-    frame.render_widget(
-        Paragraph::new(label),
-        Rect {
-            x: rect.x,
-            y: rect.y,
-            width: label_w,
-            height: 1,
-        },
-    );
+    let block = Block::bordered()
+        .border_type(app.border_type())
+        .border_style(app.theme.accent_style())
+        .title(Span::styled(" Search ", app.theme.accent_style()))
+        .title_alignment(Alignment::Left);
+    let input_area = block.inner(rect);
+    frame.render_widget(block, rect);
     crate::tui::widgets::input::render_input(
         frame,
         input_area,

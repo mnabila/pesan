@@ -371,10 +371,10 @@ pub(super) fn message_list_rect(frame_area: Rect, app: &App) -> Option<Rect> {
     Some(list)
 }
 
-/// Render a one-line filter bar on the bottom `bar` row of a pane. Every
-/// filterable section shares this look (matching the message-list search bar):
-/// an accent " filter " label, the live query, and a caret while actively
-/// typing (or a hint when the query is still empty).
+/// Render a filter box on the bottom of a pane: a bordered input with the
+/// "Filter" title on its border, the live query, and a caret while actively
+/// typing (or a hint when the query is still empty). Shares the message-list
+/// search box look.
 pub(super) fn render_filter_bar(
     frame: &mut Frame,
     bar: Rect,
@@ -393,11 +393,14 @@ pub(super) fn render_filter_bar(
     } else {
         skin.theme.dim_style()
     };
-    let line = Line::from(vec![
-        Span::styled(" filter ", skin.theme.accent_style()),
-        Span::styled(text, q_style),
-    ]);
-    frame.render_widget(Paragraph::new(line), bar);
+    let block = Block::bordered()
+        .border_type(skin.border)
+        .border_style(skin.theme.accent_style())
+        .title(Span::styled(" Filter ", skin.theme.accent_style()))
+        .title_alignment(Alignment::Left);
+    let input_area = block.inner(bar);
+    frame.render_widget(block, bar);
+    frame.render_widget(Paragraph::new(Line::from(Span::styled(text, q_style))), input_area);
 }
 
 #[cfg(test)]

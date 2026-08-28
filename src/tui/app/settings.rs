@@ -31,6 +31,12 @@ pub struct SettingsState {
     pub selected: usize,
     pub editing: bool,
     pub is_new: bool,
+    /// True while the new-account wizard is on its first step (provider chooser)
+    /// rather than the identity/auth form. Editing an existing account skips
+    /// this and goes straight to the form.
+    pub choosing_provider: bool,
+    /// Selection index within `providers` for the chooser screen.
+    pub choose_idx: usize,
     pub form: Option<AccountForm>,
     /// Within the account form, `false` navigates fields and `true` types into
     /// the focused text field (entered with `e`, left with Esc/Enter).
@@ -50,6 +56,8 @@ impl SettingsState {
             selected: 0,
             editing: false,
             is_new: false,
+            choosing_provider: false,
+            choose_idx: 0,
             form: None,
             field_editing: false,
             focus: SettingsFocus::Accounts,

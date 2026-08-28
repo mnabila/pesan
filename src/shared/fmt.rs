@@ -35,7 +35,7 @@ pub fn relative_date(ts: i64) -> String {
         } else if days < 7 {
             dt.format("%a").to_string()
         } else {
-            dt.format("%d %b").to_string()
+            dt.format("%d %b %Y").to_string()
         }
     }
 }

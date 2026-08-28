@@ -1,5 +1,5 @@
-use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::text::Span;
+use ratatui::widgets::{Block, BorderType};
 use ratatui::{Frame, layout::Rect};
 
 use super::input::render_input;
@@ -35,60 +35,28 @@ impl FormField {
     }
 }
 
-/// Draw one form row: marker column + label + input, split at `label_w`.
-pub fn render_field_row(
+/// Draw one form field as a bordered box: the label sits inside the top border
+/// (a titled block) and the text input is drawn on the single inner line. The
+/// border highlights in the accent color when the field is focused (`selected`)
+/// and is dimmed otherwise. The caller must supply an `area` at least 3 rows
+/// tall (top border + inner line + bottom border).
+pub fn render_field_box(
     frame: &mut Frame,
     area: Rect,
     f: &FormField,
     theme: &Theme,
-    label_w: u16,
-    show_marker: bool,
+    border_type: BorderType,
 ) {
-    let label_style = if f.selected {
+    let bstyle = if f.selected {
         theme.accent_style()
     } else {
         theme.dim_style()
     };
-    // With a marker column ("▸" on the selected row) the label sits two columns
-    // in; without one, render the label flush-left so it lines up with sibling
-    // rows that have no marker (e.g. the account form's Provider/Default rows).
-    let label_line = if show_marker {
-        let marker = if f.selected { "▸" } else { " " };
-        Line::from(vec![
-            Span::styled(marker, theme.accent_style()),
-            Span::styled(
-                format!(
-                    " {:<width$}",
-                    f.label,
-                    width = (label_w as usize).saturating_sub(2)
-                ),
-                label_style,
-            ),
-        ])
-    } else {
-        Line::from(Span::styled(
-            format!(
-                "{:<width$}",
-                f.label,
-                width = (label_w as usize).saturating_sub(1)
-            ),
-            label_style,
-        ))
-    };
-    frame.render_widget(
-        Paragraph::new(label_line),
-        Rect {
-            x: area.x,
-            y: area.y,
-            width: label_w.min(area.width),
-            height: 1,
-        },
-    );
-    let input_area = Rect {
-        x: area.x + label_w,
-        y: area.y,
-        width: area.width.saturating_sub(label_w),
-        height: 1,
-    };
-    render_input(frame, input_area, &f.input, theme, Some(&f.placeholder));
+    let block = Block::bordered()
+        .border_type(border_type)
+        .border_style(bstyle)
+        .title(Span::styled(f.label.clone(), bstyle));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    render_input(frame, inner, &f.input, theme, Some(&f.placeholder));
 }

@@ -129,7 +129,7 @@ fn render(frame: &mut Frame, body: Rect, p: ComposeProps, skin: &Skin) {
     };
     let [from_row, fields_area, attach_list, rule, body_area] = Layout::vertical([
         Constraint::Length(1),           // From (read-only)
-        Constraint::Length(6),           // To, Cc, Bcc, Reply-To, Subject, Attach
+        Constraint::Length(9),           // 6 fields as a 2-col grid (3 boxes, 3 rows each)
         Constraint::Length(attach_rows), // staged attachments
         Constraint::Length(1),           // rule
         Constraint::Min(3),              // body
@@ -151,11 +151,23 @@ fn render(frame: &mut Frame, body: Rect, p: ComposeProps, skin: &Skin) {
         from_row,
     );
 
-    // Editable header/attach rows.
-    const LABEL_W: u16 = 10;
-    let field_rows = Layout::vertical([Constraint::Length(1); 6]).split(fields_area);
+    // Editable header/attach rows, laid out as a 2-column grid of bordered
+    // boxes (3 rows of boxes, each box 3 rows tall = 9 rows total).
+    let [left, _gap, right] = Layout::horizontal([
+        Constraint::Ratio(1, 2),
+        Constraint::Length(1),
+        Constraint::Ratio(1, 2),
+    ])
+    .areas(fields_area);
+    let left_rows = Layout::vertical([Constraint::Length(3); 3]).split(left);
+    let right_rows = Layout::vertical([Constraint::Length(3); 3]).split(right);
     for (i, field) in p.fields.iter().enumerate() {
-        form::render_field_row(frame, field_rows[i], field, skin.theme, LABEL_W, true);
+        let area = if i % 2 == 0 {
+            left_rows[i / 2]
+        } else {
+            right_rows[i / 2]
+        };
+        form::render_field_box(frame, area, field, skin.theme, skin.border);
     }
 
     // Staged attachments, one dim row each: "<glyph> name  (size)". When there
