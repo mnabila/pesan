@@ -1,6 +1,6 @@
 [package]
 name = "pesan"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
 
@@ -11,6 +11,14 @@ opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 3
+
+# Balanced size+speed release profile for a portable single binary.
+[profile.release]
+opt-level = "s"       # optimize for size, keeps decent speed ("z" can be larger/slower here)
+lto = "thin"          # near-fat size wins, far faster to compile than fat lto
+codegen-units = 1     # better cross-unit optimization / smaller binary
+panic = "abort"       # drop unwinding tables/landing pads (no catch_unwind in the app)
+strip = true          # strip symbols
 
 [dependencies]
 anyhow = "1.0.104"
@@ -49,7 +57,15 @@ sqlx = { version = "0.8", default-features = false, features = [
   "sqlite",
   "macros",
 ] }
-tokio = { version = "1.53.1", features = ["full"] }
+tokio = { version = "1.53.1", default-features = false, features = [
+  "rt-multi-thread",
+  "macros",
+  "net",
+  "io-util",
+  "time",
+  "sync",
+  "fs",
+] }
 tokio-rustls = { version = "0.26", default-features = false, features = [
   "ring",
   "tls12",
