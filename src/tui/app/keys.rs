@@ -1,14 +1,21 @@
 use super::*;
 
 impl App {
-    /// Key handling while the job tracker window is open. Esc/q/backtick close;
-    /// `c` clears finished jobs.
-    fn jobs_key(&mut self, k: &Key) {
+    /// Key handling while the job tracker window is open. The `jobs` toggle key
+    /// (default backtick) closes it and honors remaps; `c` clears finished jobs;
+    /// any other key also closes the window.
+    async fn jobs_key(&mut self, k: &Key) {
+        if let Some(action) = crate::tui::keymap::resolve(
+            crate::tui::keymap::Ctx::Global,
+            &[*k],
+            &self.keymap_table,
+        ) {
+            self.action(action).await;
+            return;
+        }
         match k.code {
-            KeyCode::Esc | KeyCode::Char('`') => self.jobs_open = false,
-            KeyCode::Char('q') if !k.ctrl => self.jobs_open = false,
             KeyCode::Char('c') if !k.ctrl => self.jobs.clear_finished(),
-            _ => {}
+            _ => self.jobs_open = false,
         }
     }
 
@@ -41,14 +48,16 @@ impl App {
             return;
         }
         if self.jobs_open {
-            self.jobs_key(&k);
+            self.jobs_key(&k).await;
             return;
         }
         if self.help_open {
-            if matches!(k.code, KeyCode::Esc)
-                || k == Key::ch('?')
-                || (k.code == KeyCode::Char('q') && !k.ctrl)
+            // The help key (e.g. `?`) toggles the overlay closed; Esc also closes.
+            if let Some(Action::Help) =
+                crate::tui::keymap::resolve(crate::tui::keymap::Ctx::Global, &[k], &self.keymap_table)
             {
+                self.action(Action::Help).await;
+            } else if k.code == KeyCode::Esc {
                 self.help_open = false;
             }
             return;
@@ -100,7 +109,16 @@ impl App {
     }
 
     async fn confirm_key(&mut self, key: &Key) {
-        // Only y/n decide the dialog (no Enter/Esc shortcuts).
+        // Resolve the confirm keymap so y/Enter (yes) and n/Esc (no) honor user
+        // remaps; fall back to the literal y/n for compatibility.
+        if let Some(action) = crate::tui::keymap::resolve(
+            crate::tui::keymap::Ctx::Confirm,
+            &[*key],
+            &self.keymap_table,
+        ) {
+            self.action(action).await;
+            return;
+        }
         match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') => self.action(Action::ConfirmYes).await,
             KeyCode::Char('n') | KeyCode::Char('N') => self.action(Action::ConfirmNo).await,
@@ -112,18 +130,18 @@ impl App {
         let Some(search) = &mut self.search else {
             return;
         };
-        match key.code {
-            KeyCode::Esc => {
-                self.search = None;
-                self.refresh_display_list(None);
-            }
-            KeyCode::Enter => self.action(Action::CommitSearch).await,
-            _ => {
-                let _ = search
-                    .input
-                    .handle(&KeyEvent::new(key.code, key.to_modifiers()));
-            }
+        if let Some(action) = crate::tui::keymap::resolve(
+            crate::tui::keymap::Ctx::Search,
+            &[*key],
+            &self.keymap_table,
+        ) {
+            self.action(action).await;
+            return;
         }
+        // Any unbound key is text for the query.
+        let _ = search
+            .input
+            .handle(&KeyEvent::new(key.code, key.to_modifiers()));
     }
 
     pub async fn action(&mut self, a: Action) {
@@ -279,7 +297,12 @@ impl App {
                 self.search = None;
                 self.run_search(&term).await;
             }
-            Action::CloseOverlay => {}
+            Action::CloseOverlay => {
+                if self.search.is_some() {
+                    self.search = None;
+                    self.refresh_display_list(None);
+                }
+            }
             Action::SearchNext => {
                 if self.display_envelopes.len() < self.envelopes.len() {
                     self.move_message(1).await;

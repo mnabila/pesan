@@ -101,12 +101,14 @@ async fn run_app(
                 dirty = true;
             }
             Some(tui::app::event::Event::Tick) => {
-                let had_toast = app.toast.is_some();
+                let had_toast = !app.toasts.is_empty();
                 app.tick();
-                // Redraw only while animating (spinner), to clear a toast, or to
+                // Redraw while animating (spinner), while any toast is queued (so
+                // the queue advances to the next one), on the final clear, or to
                 // keep the open job tracker's elapsed/spinner/pruning live.
                 if app.busy().is_some()
-                    || (had_toast && app.toast.is_none())
+                    || !app.toasts.is_empty()
+                    || (had_toast && app.toasts.is_empty())
                     || (app.jobs_open && !app.jobs.is_empty())
                 {
                     dirty = true;

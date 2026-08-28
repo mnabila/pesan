@@ -265,10 +265,10 @@ pub struct OAuth {
 pub struct Ui {
     pub theme: String,
     pub ascii: bool,
-    /// 10-grid pane sizes: [sidebar, list, reader]. Only the sidebar width is
+    /// pane sizes: [sidebar, main]. Only the sidebar width is
     /// used now (messages open in a full-screen reader); the list/reader slots
     /// are kept for backward compatibility and ignored.
-    pub layout: [u8; 3],
+    pub layout: [u8; 2],
     /// What to show for each account in the sidebar: `name` or `email`.
     #[serde(default = "default_account_label")]
     pub account_label: String,
@@ -300,7 +300,7 @@ impl Default for Ui {
         Self {
             theme: "gruvbox".into(),
             ascii: false,
-            layout: [2, 4, 2],
+            layout: [2, 8],
             account_label: default_account_label(),
             border_type: default_border_type(),
             statusbar_position: default_statusbar_position(),
@@ -352,7 +352,7 @@ mod tests {
         let parsed: Config = serde_yaml_ng::from_str(&yaml).unwrap();
         assert_eq!(parsed.ui.theme, "gruvbox");
         assert!(!parsed.ui.ascii);
-        assert_eq!(parsed.ui.layout, [2, 4, 2]);
+        assert_eq!(parsed.ui.layout, [2, 8]);
         assert_eq!(parsed.ui.statusbar_position, "bottom");
         assert_eq!(parsed.notifications.folders, vec!["INBOX"]);
         assert!(parsed.providers.contains_key("gmail"));
@@ -443,7 +443,7 @@ mod tests {
         fs::write(&path, DEFAULT_YAML).unwrap();
         let parsed = Config::from_file(&path).unwrap();
         assert_eq!(parsed.ui.theme, "gruvbox");
-        assert_eq!(parsed.ui.layout, [2, 4, 2]);
+        assert_eq!(parsed.ui.layout, [2, 8]);
         assert_eq!(parsed.ui.border_type, "plain");
         assert_eq!(parsed.ui.statusbar_position, "bottom");
         assert_eq!(parsed.providers["gmail"].imap.port, 993);

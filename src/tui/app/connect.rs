@@ -91,7 +91,7 @@ impl App {
                 self.spawn_folder_counts();
                 // Warm the cache for this account's other folders too.
                 self.spawn_folder_sync_all();
-                self.restart_idle_watcher().await;
+                self.start_account_watcher(self.active_account).await;
                 // Stay wherever the user is when a connect finishes (e.g. the
                 // account manager): just surface the success toast below rather
                 // than yanking them to the inbox.
@@ -157,7 +157,7 @@ impl App {
         });
         // Stop trusting the dead session: go offline on the cache so navigation
         // still works during the reconnect window, then reconnect the account.
-        self.idle_watcher = None;
+        self.idle_watchers.remove(&account);
         self.live = false;
         self.source = offline_source(&self.services, self.active_account_id()).await;
         self.set_toast(
@@ -169,11 +169,8 @@ impl App {
 
     /// Called once per frame from the event loop; expires stale toasts.
     pub fn tick(&mut self) {
-        if let Some(t) = &self.toast
-            && Instant::now() >= t.expires
-        {
-            self.toast = None;
-        }
+        let now = Instant::now();
+        self.toasts.retain(|t| now < t.expires);
         // Let finished jobs linger briefly in the tracker, then drop them so the
         // window and the running-job indicator settle back to idle.
         self.jobs.prune(Duration::from_secs(10));
@@ -234,7 +231,8 @@ impl App {
     /// without any network. Used for offline-first display and as the fallback
     /// when a live connection can't be established.
     async fn show_cached_source(&mut self) {
-        self.idle_watcher = None;
+        // Arrival watchers are per-account and persist across switches, so the
+        // focused account keeps being watched independently of this cached view.
         self.live = false;
         self.source = offline_source(&self.services, self.active_account_id()).await;
         let folders = self.source.list_folders().await.unwrap_or_default();
@@ -354,12 +352,16 @@ impl App {
                 self.queue_auto_reauth(&account).await;
             }
             self.spawn_connect(active).await;
+            // Watch every authorized account for new mail, not just the active
+            // one, so arrivals are pulled and notified regardless of focus.
+            self.start_account_watcher(active).await;
         }
         for idx in 0..self.accounts.len() {
             if idx != active {
                 // Background warm-up: no spinner, sync all folders, INBOX-first.
                 self.spawn_connect_inner(idx, false, true, "INBOX".to_string())
                     .await;
+                self.start_account_watcher(idx).await;
             }
         }
     }
@@ -500,12 +502,16 @@ impl App {
     /// Start (or restart) the background new-mail watcher for the active
     /// account. Dropping the previous watcher stops it. No-op without an event
     /// sender or stored credentials.
-    async fn restart_idle_watcher(&mut self) {
-        self.idle_watcher = None;
+    /// Start (or replace) the background arrival watcher for one account. The
+    /// watcher opens its own IMAP connection and polls/IDLEs the watched folder,
+    /// pushing [`NewMail`] batches into the app event stream. It is started for
+    /// every authorized account so new mail is pulled and notified even when the
+    /// account is not in focus. The poll cadence comes from `ui.poll_interval_secs`.
+    async fn start_account_watcher(&mut self, idx: usize) {
         let Some(tx) = self.event_tx.clone() else {
             return;
         };
-        let params = match self.connect_params(self.active_account).await {
+        let params = match self.connect_params(idx).await {
             Ok(Some(p)) => p,
             _ => return,
         };
@@ -527,10 +533,10 @@ impl App {
                 let _ = tx.send(crate::tui::app::event::Event::NewMail(batch));
             }
         });
-        self.idle_watcher = Some(
-            self.services
-                .watcher
-                .watch(params, mailbox, account, poll, mail_tx),
-        );
+        let handle = self
+            .services
+            .watcher
+            .watch(params, mailbox, account.clone(), poll, mail_tx);
+        self.idle_watchers.insert(account, handle);
     }
 }

@@ -779,7 +779,7 @@ fn render_account_form(frame: &mut Frame, area: Rect, p: &AccountFormProps, skin
         }
     }
 
-    let grid_rows = (boxes.len() + 1) / 2;
+    let grid_rows = boxes.len().div_ceil(2);
     let mut constraints: Vec<Constraint> = header.iter().map(|_| Constraint::Length(1)).collect();
     if grid_rows > 0 {
         constraints.push(Constraint::Length((3 * grid_rows) as u16));

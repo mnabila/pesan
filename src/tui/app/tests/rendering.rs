@@ -239,12 +239,23 @@ async fn list_date_column_is_right_aligned() {
         " ",
         "one-column margin before the border"
     );
-    let date_tail: String = ((border_x - 4)..(border_x - 1))
-        .map(|x| buf[(x, row)].symbol())
+    // The date is right-aligned: it ends immediately left of the one-column margin,
+    // with no gap. The first (newest) message uses the epoch date -> "01 Jan 1970"
+    // (see test_app's `date: 1000 - uid` for the newest message).
+    let first_date = 999;
+    let expected = crate::shared::fmt::relative_date(first_date);
+    let needle = expected.split_once(' ').map(|(_, rest)| rest).unwrap_or(&expected);
+    let cells: Vec<String> = (0..buf.area.width)
+        .map(|x| buf[(x as u16, row)].symbol().to_string())
         .collect();
-    assert_eq!(
-        date_tail, "Jan",
-        "date sits right-aligned before the margin"
+    let needle_cells: Vec<String> = needle.chars().map(|c| c.to_string()).collect();
+    let idx = (0..=cells.len().saturating_sub(needle_cells.len()))
+        .find(|&s| cells[s..s + needle_cells.len()] == *needle_cells)
+        .expect("date rendered in list row");
+    let gap = &cells[idx + needle_cells.len()..(border_x as usize - 1)];
+    assert!(
+        gap.iter().all(|c| c == " "),
+        "date '{needle}' sits right-aligned before the margin, gap={gap:?}"
     );
 }
 
@@ -366,7 +377,7 @@ async fn statusbar_left_identity_and_right_status_slot() {
     );
 
     // With no notification, an in-flight sync shows a determinate progress bar.
-    app.toast = None;
+    app.toasts.clear();
     app.sync = Some(crate::tui::app::event::SyncProgress {
         account: app.active_account_name().to_string(),
         done: 3,
@@ -374,8 +385,8 @@ async fn statusbar_left_identity_and_right_status_slot() {
     });
     term.draw(|f| crate::tui::views::draw(f, &app)).unwrap();
     assert!(
-        row_text(&term, 29).contains("Syncing 3/10"),
-        "determinate sync bar renders in the status bar"
+        row_text(&term, 29).contains("3/10"),
+        "determinate sync gauge renders in the status bar"
     );
 
     // Reaching the total clears the bar.

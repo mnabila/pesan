@@ -214,7 +214,7 @@ providers:
 ui:
   theme: gruvbox            # dark | light | mono | any custom theme name
   ascii: false              # true = ASCII glyph fallback (no unicode icons)
-  layout: [2, 4, 2]         # 10-grid pane widths; only the sidebar slot is used (messages open full-screen)
+  layout: [2, 8]             # [sidebar, main] pane-width ratio; only the sidebar slot is used (messages open full-screen)
   account_label: name       # sidebar account label: name | email
   border_type: plain        # plain | rounded | thick | double
   poll_interval_secs: 120   # background refresh fallback when IMAP IDLE is unavailable
@@ -264,13 +264,50 @@ Remap any action to your own keys, grouped by keymap section. A section only aff
 
 ```yaml
 keybinding:
-  global:
+  global:               # work in every context
     quit: q
     help: "?"
-  list:
+    jobs: "`"
+    settings: S
+    focus_next: L
+    focus_prev: H
+    toggle_sidebar: z
+    refresh: R
+  folders:              # sidebar: folder tree / account switcher
+    select_folder: o
+    expand_folder: l
+    collapse_folder: h
+    filter_accounts: /
+  list:                 # message list
     open_message: [enter, o]
-  compose:
+    compose: c
+    reply: r
+    forward: f
+    delete: d
+    archive: a
+    search: /
+    back: esc
+  reader:               # full-screen message view
+    reply: r
+    forward: f
+    open_attachment: o
+    delete: d
+    archive: a
+    back: esc
+  compose:              # compose form (body edited in $EDITOR)
     send: ctrl+s
+    save_draft: ctrl+d
+    external_editor: ctrl+e
+    discard_draft: esc
+  settings:
+    save_settings: W
+    close_settings: esc
+  search:
+    commit_search: enter
+    close_overlay: esc
+  confirm:              # yes/no dialog
+    confirm_yes: [y, enter]
+    confirm_no: [n, esc]
 ```
 
 ---

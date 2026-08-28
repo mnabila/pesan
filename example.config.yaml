@@ -43,11 +43,11 @@ providers: # OAuth app + server definitions, shared across accounts
 ui:
   theme: gruvbox # dark | light | mono, or any custom theme name below
   ascii: false # true = ASCII glyph fallback (no unicode icons)
-  layout: [2, 4, 2] # 10-grid pane widths; only the sidebar slot is used (messages open full-screen)
+  layout: [2, 8] # [sidebar, main] pane-width ratio; only the sidebar slot is used (messages open full-screen)
   account_label: name # sidebar account label: name | email
   border_type: plain # pane border weight: plain | rounded | thick | double
   statusbar_position: bottom # single statusbar placement: top | bottom
-  poll_interval_secs: 120 # background refresh (fallback when IMAP IDLE unavailable)
+  poll_interval_secs: 120 # per-account new-mail watcher cadence (fallback poll when IMAP IDLE is unavailable)
 
 notifications:
   enabled: true # desktop notification on new mail
@@ -93,28 +93,64 @@ keybinding:
     help: "?"
     jobs: "`" # toggle the background job tracker window
     settings: S
+    focus_next: L # focus the next pane
+    focus_prev: H # focus the previous pane
     toggle_sidebar: z
     refresh: R # re-fetch the current mailbox from the server
   folders: # sidebar: folder tree / account switcher
+    move_down: j
+    move_up: k
+    move_first: gg
+    move_last: G
     select_folder: o
-    expand_folder: l
-    collapse_folder: h
+    expand_folder: [l, right]
+    collapse_folder: [h, left]
+    filter_accounts: /
   list: # message list
+    move_down: j
+    move_up: k
+    move_first: gg
+    move_last: G
+    page_up: pgup
+    page_down: pgdn
     open_message: [enter, o] # open the selected message with Enter or o
+    toggle_mark: " " # mark / unmark for bulk actions
+    toggle_unread: u
+    toggle_flag: s
+    delete: d # delete (confirm)
+    archive: a
+    search: /
+    search_next: n
+    search_prev: N
     compose: c # compose a new message
     reply: r
     forward: f
+    back: esc # back to folders
   reader: # full-screen message view
+    scroll_up: k
+    scroll_down: j
+    scroll_start: gg
+    scroll_end: G
+    scroll_half_up: ctrl+u
+    scroll_half_down: ctrl+d
     reply: r
     forward: f
+    open_attachment: o
+    toggle_headers: h
+    delete: d
+    archive: a
+    back: esc
   compose: # compose form (body is edited in $EDITOR)
     send: ctrl+s
     save_draft: ctrl+d
-    external_editor: [e, ctrl+e]
+    external_editor: ctrl+e
+    discard_draft: esc
   settings:
     save_settings: W
+    close_settings: esc
   search:
     commit_search: enter
+    close_overlay: esc
   confirm: # yes/no dialog
     confirm_yes: [y, enter]
     confirm_no: [n, esc]

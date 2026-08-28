@@ -13,7 +13,7 @@ async fn refresh_key_on_offline_account_attempts_reconnect() {
     // The test harness serves a cached (offline) account, so pressing R can't
     // fetch live - it should fall back to a reconnect attempt, never panic.
     send_key!(app, Key::ch('R'));
-    let toast = app.toast.as_ref().expect("refresh toast");
+    let toast = app.toasts.last().expect("refresh toast");
     let text = toast.text.to_lowercase();
     assert!(
         text.contains("reconnect") || text.contains("offline"),

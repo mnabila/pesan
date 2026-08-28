@@ -241,7 +241,10 @@ pub struct App {
     /// Registry of tracked background jobs shown in the tracker window.
     pub jobs: JobRegistry,
     pub confirm: Option<ConfirmState>,
-    pub toast: Option<Toast>,
+    /// Pending notifications, in arrival order. Drawn one at a time; each expires
+    /// on its own so a burst (e.g. several accounts at once) queues instead of
+    /// the newest overwriting the rest.
+    pub toasts: Vec<Toast>,
     pub pending_external: Option<PendingExternalEditor>,
     pub pending_oauth: Option<PendingOAuth>,
     /// An opened consent waiting for the user to paste the redirect URL back.
@@ -263,9 +266,11 @@ pub struct App {
     pub sync: Option<crate::tui::app::event::SyncProgress>,
     /// Sender the IMAP IDLE watcher uses to push new-mail events to the loop.
     event_tx: Option<UnboundedSender<Event>>,
-    /// Active new-mail watcher (one per live account); dropping it stops it.
-    /// Running arrival watcher for the live account; dropping it stops it.
-    idle_watcher: Option<Box<dyn crate::application::ports::WatchHandle>>,
+    /// Arrival watchers, one per connected account. Dropping an entry stops that
+    /// account's background new-mail polling/IDLE. The app keeps one for every
+    /// authorized account so new mail is pulled and notified even when the
+    /// account is not the one currently in focus.
+    idle_watchers: HashMap<String, Box<dyn crate::application::ports::WatchHandle>>,
     /// Set while an automatic reconnect (after a live session wedged) is in
     /// flight, so overlapping `ConnectionLost` events don't stack reconnects and
     /// `on_connected` can restore the pre-drop selection. `None` = not reconnecting.
@@ -355,7 +360,7 @@ impl App {
             jobs_open: false,
             jobs: JobRegistry::new(),
             confirm: None,
-            toast: None,
+            toasts: Vec::new(),
             pending_external: None,
             pending_oauth: None,
             oauth_paste: None,
@@ -365,7 +370,7 @@ impl App {
             spinner_frame: 0,
             sync: None,
             event_tx: None,
-            idle_watcher: None,
+            idle_watchers: HashMap::new(),
             reconnect: None,
             auto_reauth_attempted: HashSet::new(),
             theme_name,
@@ -529,7 +534,11 @@ impl App {
     }
 
     pub fn set_toast(&mut self, text: impl Into<String>, kind: ToastKind) {
-        self.toast = Some(Toast::new(text, kind));
+        self.toasts.push(Toast::new(text, kind));
+        // Keep the backlog bounded so a flood of accounts can't grow forever.
+        if self.toasts.len() > 5 {
+            self.toasts.remove(0);
+        }
     }
 
     /// Wire the loop's event sender so background watchers can push new mail.

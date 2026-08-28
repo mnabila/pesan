@@ -13,7 +13,7 @@ pub fn sqlite_services(pool: Db) -> Services {
         cache: std::sync::Arc::new(database::cache::SqliteMailCache::new(pool.clone())),
         tokens: std::sync::Arc::new(auth::token::KeyringTokenStore::new(pool.clone())),
         backend: std::sync::Arc::new(mail::backend::ImapBackend::new(pool)),
-        notifier: std::sync::Arc::new(mail::notify::DesktopNotifier),
+        notifier: std::sync::Arc::new(mail::notify::DesktopNotifier::new()),
         watcher: std::sync::Arc::new(mail::imap::idle::IdleWatchFactory),
     }
 }

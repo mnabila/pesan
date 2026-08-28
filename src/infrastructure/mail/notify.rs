@@ -1,3 +1,7 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
 use anyhow::{Context, Result};
 
 use crate::domain::Envelope;
@@ -61,8 +65,53 @@ pub fn new_mail_batch(account: &str, envelopes: &[Envelope], show_sender: bool) 
 // Port adapter ----------------------------------------------------------
 
 /// [`Notifier`] backed by the platform desktop-notification mechanism;
-/// delegates to [`new_mail_batch`].
-pub struct DesktopNotifier;
+/// Desktop notification backend. It probes for a running notification daemon
+/// (via D-Bus) and skips sending when none is available, so a TUI/SSH/headless
+/// session doesn't spam warnings or attempt futile popups. If the daemon goes
+/// away mid-session it stops trying until a cooldown re-probe succeeds.
+pub struct DesktopNotifier {
+    available: AtomicBool,
+    last_checked: Mutex<Instant>,
+}
+
+impl Default for DesktopNotifier {
+    fn default() -> Self {
+        Self {
+            available: AtomicBool::new(true),
+            last_checked: Mutex::new(Instant::now()),
+        }
+    }
+}
+
+impl DesktopNotifier {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// True when a notification server is reachable. When the last known state
+    /// was "unavailable" it re-probes on a cooldown so a daemon that starts later
+    /// is picked up.
+    fn reachable(&self) -> bool {
+        if self.available.load(Ordering::Relaxed) {
+            return true;
+        }
+        let mut last = match self.last_checked.lock() {
+            Ok(g) => g,
+            Err(_) => return false,
+        };
+        if last.elapsed() < Duration::from_secs(300) {
+            return false;
+        }
+        *last = Instant::now();
+        match notify_rust::get_server_information() {
+            Ok(_) => {
+                self.available.store(true, Ordering::Relaxed);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+}
 
 #[allow(dead_code)] // port consumed from Phase 2 onward
 impl crate::application::ports::Notifier for DesktopNotifier {
@@ -72,6 +121,21 @@ impl crate::application::ports::Notifier for DesktopNotifier {
         envelopes: &[Envelope],
         show_sender: bool,
     ) -> Result<()> {
-        new_mail_batch(account, envelopes, show_sender)
+        if !self.reachable() {
+            // No notification daemon running: don't trigger a (futile) desktop popup.
+            return Ok(());
+        }
+        match new_mail_batch(account, envelopes, show_sender) {
+            Ok(()) => {
+                self.available.store(true, Ordering::Relaxed);
+                Ok(())
+            }
+            Err(e) => {
+                // The daemon went away; suppress further attempts until the next probe.
+                tracing::debug!("desktop notification failed: {e:#}");
+                self.available.store(false, Ordering::Relaxed);
+                Ok(())
+            }
+        }
     }
 }

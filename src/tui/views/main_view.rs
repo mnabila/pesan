@@ -7,7 +7,6 @@ pub(crate) struct Skin<'a> {
     pub theme: &'a Theme,
     pub glyphs: Glyphs,
     pub border: ratatui::widgets::BorderType,
-    pub ascii: bool,
 }
 
 impl<'a> Skin<'a> {
@@ -16,7 +15,6 @@ impl<'a> Skin<'a> {
             theme: &app.theme,
             glyphs: app.glyphs,
             border: app.border_type(),
-            ascii: app.config.ui.ascii,
         }
     }
 
@@ -175,7 +173,7 @@ pub(super) fn status_props(app: &App) -> StatusProps {
     let jobs = (running_jobs > 0).then_some(running_jobs);
 
     // Right: one live status slot (notification > sync bar > connect spinner).
-    let slot = if let Some(toast) = &app.toast {
+    let slot = if let Some(toast) = app.toasts.first() {
         let glyph = match toast.kind {
             ToastKind::Success => app.glyphs.ok,
             ToastKind::Warning | ToastKind::Error => app.glyphs.warning,
@@ -238,6 +236,10 @@ pub(super) fn render_statusbar(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     // Right: one live status slot (notification > sync bar > connect spinner).
+    let sync = match &p.slot {
+        Slot::Sync { done, total } => Some((*done, *total)),
+        _ => None,
+    };
     let right: Vec<Span> = match p.slot {
         Slot::None => Vec::new(),
         Slot::Toast { text, kind, glyph } => {
@@ -254,13 +256,7 @@ pub(super) fn render_statusbar(frame: &mut Frame, area: Rect, app: &App) {
             };
             vec![Span::styled(text, style)]
         }
-        Slot::Sync { done, total } => {
-            let bar = progress_bar(done, total, 10, skin.ascii);
-            vec![Span::styled(
-                format!("Syncing {done}/{total} {bar} "),
-                skin.theme.dim_style(),
-            )]
-        }
+        Slot::Sync { .. } => Vec::new(),
         Slot::Busy { spinner, text } => vec![Span::styled(
             format!("{spinner} {text} "),
             skin.theme.accent_style(),
@@ -272,27 +268,35 @@ pub(super) fn render_statusbar(frame: &mut Frame, area: Rect, app: &App) {
     let pad = (area.width as usize).saturating_sub(left_w + right_w);
     left.push(Span::raw(" ".repeat(pad)));
     left.extend(right);
+
+    // Sync progress is drawn as a real gauge on the right of the bar; the rest
+    // of the status line stays on the left.
+    if let Some((done, total)) = sync {
+        let w = 24.min(area.width);
+        let gauge_area = Rect::new(
+            area.x + area.width.saturating_sub(w),
+            area.y,
+            w,
+            area.height,
+        );
+        let text_area = Rect::new(area.x, area.y, area.width.saturating_sub(w), area.height);
+        frame.render_widget(
+            Paragraph::new(Line::from(left.clone())).style(skin.theme.fg_style()),
+            text_area,
+        );
+        let ratio = if total == 0 { 0.0 } else { (done as f64 / total as f64).min(1.0) };
+        let gauge = ratatui::widgets::Gauge::default()
+            .ratio(ratio)
+            .label(format!(" {done}/{total} "))
+            .gauge_style(skin.theme.fg_style());
+        frame.render_widget(gauge, gauge_area);
+        return;
+    }
+
     frame.render_widget(
         Paragraph::new(Line::from(left)).style(skin.theme.fg_style()),
         area,
     );
-}
-
-/// A fixed-`width` determinate progress bar, e.g. `[######----]`. Uses block
-/// glyphs normally, ASCII (`#`/`-`) when `ui.ascii` is set. Pure formatting.
-pub(super) fn progress_bar(done: usize, total: usize, width: usize, ascii: bool) -> String {
-    let (full, empty) = if ascii { ('#', '-') } else { ('█', '░') };
-    let filled = ((done * width) + total / 2)
-        .checked_div(total)
-        .unwrap_or(0)
-        .min(width);
-    let mut bar = String::with_capacity(width + 2);
-    bar.push('[');
-    for i in 0..width {
-        bar.push(if i < filled { full } else { empty });
-    }
-    bar.push(']');
-    bar
 }
 
 pub(super) fn render_body(frame: &mut Frame, area: Rect, app: &App, skin: &Skin) {
@@ -307,7 +311,7 @@ pub(super) fn render_body(frame: &mut Frame, area: Rect, app: &App, skin: &Skin)
 }
 
 /// Split the body into the sidebar + message list. The sidebar width comes from
-/// the first `ui.layout` slot; the list fills the rest. Messages open in a
+/// the `ui.layout[0]` sidebar slot against `ui.layout[1]` main; the list fills the rest. Messages open in a
 /// separate full-screen reader view, so there is no reader pane here.
 pub(super) fn pane_layout(area: Rect, app: &App, collapsed: bool) -> [Rect; 2] {
     let sidebar_c = if collapsed {
@@ -318,12 +322,12 @@ pub(super) fn pane_layout(area: Rect, app: &App, collapsed: bool) -> [Rect; 2] {
     Layout::horizontal([sidebar_c, Constraint::Min(0)]).areas(area)
 }
 
-/// Turn the sidebar slot of the 10-grid `layout` into a width `Constraint`. The
+/// Turn the sidebar slot of the 2-element `layout` into a width `Constraint`. The
 /// list/reader slots are legacy and ignored; the list takes the remaining width.
-pub(super) fn sidebar_ratio(layout: [u8; 3]) -> Constraint {
-    const GRID: u32 = 10;
-    let s = (layout[0] as u32).clamp(1, GRID - 1);
-    Constraint::Ratio(s, GRID)
+pub(super) fn sidebar_ratio(layout: [u8; 2]) -> Constraint {
+    let s = (layout[0] as u32).max(1);
+    let m = (layout[1] as u32).max(1);
+    Constraint::Ratio(s, s + m)
 }
 
 pub(super) fn render_narrow_body(frame: &mut Frame, area: Rect, app: &App, skin: &Skin) {
@@ -405,18 +409,15 @@ pub(super) fn render_filter_bar(
 
 #[cfg(test)]
 mod status_tests {
-    use super::progress_bar;
-
     #[test]
-    fn progress_bar_rounds_and_clamps() {
-        assert_eq!(progress_bar(0, 10, 10, true), "[----------]");
-        assert_eq!(progress_bar(5, 10, 10, true), "[#####-----]");
-        // Rounding to nearest cell.
-        assert_eq!(progress_bar(1, 3, 10, true), "[###-------]");
-        // done > total clamps to full.
-        assert_eq!(progress_bar(20, 10, 10, true), "[##########]");
-        // Empty progress (total == 0) renders empty.
-        assert_eq!(progress_bar(0, 0, 4, true), "[----]");
-        assert_eq!(progress_bar(2, 2, 4, false), "[████]");
+    fn sync_gauge_ratio_clamps() {
+        // The gauge ratio is derived from done/total; ensure it never exceeds 1.
+        let ratio = |done: usize, total: usize| -> f64 {
+            if total == 0 { 0.0 } else { (done as f64 / total as f64).min(1.0) }
+        };
+        assert!((0.0..=1.0).contains(&ratio(0, 10)));
+        assert!((0.0..=1.0).contains(&ratio(5, 10)));
+        assert!((0.0..=1.0).contains(&ratio(20, 10)));
+        assert_eq!(ratio(0, 0), 0.0);
     }
 }

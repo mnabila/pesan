@@ -109,6 +109,24 @@ impl Key {
         }
     }
 
+    pub const fn page_up() -> Self {
+        Self {
+            code: KeyCode::PageUp,
+            ctrl: false,
+            alt: false,
+            shift: false,
+        }
+    }
+
+    pub const fn page_down() -> Self {
+        Self {
+            code: KeyCode::PageDown,
+            ctrl: false,
+            alt: false,
+            shift: false,
+        }
+    }
+
     /// Derive from a crossterm `KeyEvent`.
     pub fn from_event(e: &KeyEvent) -> Self {
         let has = |m: KeyModifiers| e.modifiers.contains(m);
@@ -339,6 +357,49 @@ mod tests {
 
     use super::*;
     use crate::bootstrap::config::{KeyBindings, KeySpecs};
+
+    #[test]
+    fn new_actions_are_bound_by_default() {
+        let table = build_table(&HashMap::new());
+        assert_eq!(resolve(Ctx::List, &[Key::page_up()], &table), Some(Action::PageUp));
+        assert_eq!(resolve(Ctx::List, &[Key::page_down()], &table), Some(Action::PageDown));
+        assert_eq!(
+            resolve(Ctx::Reader, &[Key::cc('u')], &table),
+            Some(Action::ScrollHalfUp)
+        );
+        assert_eq!(
+            resolve(Ctx::Reader, &[Key::cc('d')], &table),
+            Some(Action::ScrollHalfDown)
+        );
+    }
+
+    #[test]
+    fn overrides_apply_to_confirm_search_compose_settings() {
+        let mut kb: KeyBindings = HashMap::new();
+        let mut confirm = HashMap::new();
+        confirm.insert("confirm_no".into(), KeySpecs::One("x".into()));
+        kb.insert("confirm".into(), confirm);
+        let mut search = HashMap::new();
+        search.insert("commit_search".into(), KeySpecs::One("space".into()));
+        kb.insert("search".into(), search);
+        let mut compose = HashMap::new();
+        compose.insert("send".into(), KeySpecs::One("ctrl+x".into()));
+        kb.insert("compose".into(), compose);
+        let mut settings = HashMap::new();
+        settings.insert("save_settings".into(), KeySpecs::One("s".into()));
+        kb.insert("settings".into(), settings);
+        let table = build_table(&kb);
+
+        // Confirm: user remap 'x' rejects, built-in 'y' still confirms.
+        assert_eq!(resolve(Ctx::Confirm, &[Key::ch('x')], &table), Some(Action::ConfirmNo));
+        assert_eq!(resolve(Ctx::Confirm, &[Key::ch('y')], &table), Some(Action::ConfirmYes));
+        // Search: space now commits the search.
+        assert_eq!(resolve(Ctx::Search, &[Key::ch(' ')], &table), Some(Action::CommitSearch));
+        // Compose: ctrl+x now sends.
+        assert_eq!(resolve(Ctx::Compose, &[Key::cc('x')], &table), Some(Action::Send));
+        // Settings: 's' now saves.
+        assert_eq!(resolve(Ctx::Settings, &[Key::ch('s')], &table), Some(Action::SaveSettings));
+    }
 
     #[test]
     fn parses_bare_chars_and_shift() {

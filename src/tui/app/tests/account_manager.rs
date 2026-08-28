@@ -107,7 +107,7 @@ async fn cancelling_consent_drops_overlay_without_error() {
     app.cancel_oauth();
     assert!(!app.oauth_in_progress, "overlay cleared after cancel");
     assert!(
-        matches!(app.toast.as_ref().map(|t| t.kind), Some(ToastKind::Info)),
+        matches!(app.toasts.last().map(|t| t.kind), Some(ToastKind::Info)),
         "cancel is informational, not an error"
     );
 
@@ -335,7 +335,7 @@ async fn authorize_no_longer_requires_name_and_email() {
     // (and still queues nothing).
     send_key!(app, Key::enter());
     assert!(app.pending_oauth.is_none());
-    let toast = app.toast.as_ref().expect("a toast");
+    let toast = app.toasts.last().expect("a toast");
     assert_eq!(toast.kind, ToastKind::Error);
     assert!(toast.text.to_lowercase().contains("oauth config"));
 }
@@ -371,7 +371,7 @@ async fn authorize_reports_missing_provider_credentials() {
     }
     app.request_authorize();
     assert!(app.pending_oauth.is_none());
-    let toast = app.toast.as_ref().expect("config error toast");
+    let toast = app.toasts.last().expect("config error toast");
     assert_eq!(toast.kind, ToastKind::Error);
     assert!(toast.text.to_lowercase().contains("oauth config"));
 }
@@ -453,7 +453,7 @@ async fn save_password_account_requires_a_password() {
     }
     app.save_password_account().await; // no password typed
     assert!(app.settings.as_ref().unwrap().editing, "form stays open");
-    assert_eq!(app.toast.as_ref().unwrap().kind, ToastKind::Warning);
+    assert_eq!(app.toasts.last().unwrap().kind, ToastKind::Warning);
     let accounts = crate::infrastructure::database::accounts::list(&app.pool)
         .await
         .unwrap();
@@ -734,7 +734,7 @@ async fn connect_while_in_account_manager_stays_and_only_toasts() {
     .await;
 
     assert_eq!(app.view, View::Settings, "stays in the account manager");
-    let toast = app.toast.as_ref().expect("success toast");
+    let toast = app.toasts.last().expect("success toast");
     assert_eq!(toast.kind, ToastKind::Success);
     assert!(toast.text.contains("Connected"));
 }

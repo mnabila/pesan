@@ -110,7 +110,7 @@ async fn compose_send_offline_reports_error_and_keeps_compose() {
     // send fails: the compose stays open and an error toast explains why.
     assert_eq!(app.view, View::Compose);
     assert!(app.compose.is_some());
-    let toast = app.toast.as_ref().expect("send-failure toast");
+    let toast = app.toasts.last().expect("send-failure toast");
     assert_eq!(toast.kind, ToastKind::Error);
 }
 

@@ -9,12 +9,23 @@ impl App {
             return;
         };
 
-        // Send/draft/editor work from anywhere, in either mode.
+        // Send / save-draft work from anywhere, honoring user remaps.
+        if let Some(a) = crate::tui::keymap::resolve(
+            crate::tui::keymap::Ctx::Compose,
+            &[*key],
+            &self.keymap_table,
+        ) {
+            match a {
+                Action::Send | Action::SaveDraft => {
+                    self.action(a).await;
+                    return;
+                }
+                _ => {}
+            }
+        }
+
+        // Tab / Shift-Tab always move between rows and leave editing mode.
         match key.code {
-            KeyCode::Char('s') if key.ctrl => return self.action(Action::Send).await,
-            KeyCode::Char('d') if key.ctrl => return self.action(Action::SaveDraft).await,
-            KeyCode::Char('e') if key.ctrl => return self.action(Action::ExternalEditor).await,
-            // Tab/Shift-Tab always move between rows and leave editing mode.
             KeyCode::Tab => {
                 if let Some(c) = &mut self.compose {
                     c.editing = false;
@@ -35,6 +46,28 @@ impl App {
         if editing {
             self.compose_edit_key(key, focus).await;
         } else {
+            // Nav mode: honor the rest of the compose keymap (external editor,
+            // discard) and the global overlay toggles, then fall back to the
+            // built-in field navigation.
+            if let Some(a) = crate::tui::keymap::resolve(
+                crate::tui::keymap::Ctx::Compose,
+                &[*key],
+                &self.keymap_table,
+            ) {
+                match a {
+                    Action::ExternalEditor | Action::DiscardDraft => {
+                        self.action(a).await;
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(Action::Help) =
+                crate::tui::keymap::resolve(crate::tui::keymap::Ctx::Global, &[*key], &self.keymap_table)
+            {
+                self.action(Action::Help).await;
+                return;
+            }
             self.compose_nav_key(key, focus).await;
         }
     }
@@ -186,28 +219,42 @@ impl App {
         // Shift+W saves, except while actively typing into a form text field,
         // where the character must reach the input instead.
         let field_editing = self.settings.as_ref().is_some_and(|s| s.field_editing);
-        if key.code == KeyCode::Char('W') && !field_editing {
-            self.action(Action::SaveSettings).await;
-            return;
-        }
-        // `?` opens the account-manager help overlay (unless typing into a field).
-        if key.code == KeyCode::Char('?') && !field_editing {
-            self.help_open = true;
-            return;
-        }
 
-        // App-level keys work in every settings mode. Field navigation is j/k
-        // (Tab is intentionally not a selector in the account form).
-        match key.code {
-            KeyCode::Esc if !editing => {
-                self.action(Action::CloseSettings).await;
+        // Honor user remaps for the settings keymap (save / close). While a form
+        // text field is being typed into, these keys must still reach the input,
+        // so the save guard respects `field_editing` and close respects `editing`.
+        if !field_editing {
+            if let Some(a) = crate::tui::keymap::resolve(
+                crate::tui::keymap::Ctx::Settings,
+                &[*key],
+                &self.keymap_table,
+            ) {
+                match a {
+                    Action::SaveSettings => {
+                        self.action(a).await;
+                        return;
+                    }
+                    Action::CloseSettings if !editing => {
+                        self.action(a).await;
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+            // `?` opens the help overlay (global toggle) unless typing into a field.
+            if let Some(Action::Help) = crate::tui::keymap::resolve(
+                crate::tui::keymap::Ctx::Global,
+                &[*key],
+                &self.keymap_table,
+            ) {
+                self.action(Action::Help).await;
                 return;
             }
-            KeyCode::Char('q') if !editing && !key.ctrl => {
-                self.action(Action::CloseSettings).await;
-                return;
-            }
-            _ => {}
+        }
+        // `q` closes the account manager even if the user has not remapped it.
+        if key.code == KeyCode::Char('q') && !editing && !key.ctrl {
+            self.action(Action::CloseSettings).await;
+            return;
         }
 
         if editing {

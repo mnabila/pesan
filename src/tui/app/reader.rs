@@ -5,10 +5,54 @@ impl App {
     /// (when the inbox is what's showing) and raise one coalesced desktop
     /// notification. Envelopes already present (by uid) are ignored.
     pub async fn on_new_mail(&mut self, batch: NewMail) {
-        // Only reflect mail for the account currently in focus.
-        if batch.account != self.active_account_name() {
+        let is_active = batch.account == self.active_account_name();
+
+        // Persist new arrivals to the cache for the owning account, so they show
+        // up when the user switches to that account and while offline. The watcher
+        // only follows the configured notifications folder, so mirror that here.
+        if let Some(id) = self
+            .accounts
+            .iter()
+            .find(|a| a.name == batch.account)
+            .and_then(|a| a.id)
+        {
+            let folder = self
+                .config
+                .notifications
+                .folders
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "INBOX".to_string());
+            if let Ok(cached) = self.services.cache.load_envelopes(id, &folder).await {
+                let fresh: Vec<Envelope> = batch
+                    .envelopes
+                    .iter()
+                    .filter(|e| cached.iter().all(|x| x.uid != e.uid))
+                    .cloned()
+                    .collect();
+                if !fresh.is_empty() {
+                    let _ = self
+                        .services
+                        .cache
+                        .upsert_envelopes(id, &folder, &fresh)
+                        .await;
+                }
+            }
+        }
+
+        // Non-focused accounts: surface an in-app toast (so the user sees it even
+        // without a desktop notification daemon) and raise the desktop notify,
+        // then let the cache above carry the arrivals. The focused account's UI
+        // is updated below.
+        if !is_active {
+            self.notify_new_mail(&batch.account, &batch.envelopes);
+            self.set_toast(
+                format!("{}: {} new message(s)", batch.account, batch.envelopes.len()),
+                ToastKind::Info,
+            );
             return;
         }
+
         let fresh: Vec<Envelope> = batch
             .envelopes
             .into_iter()
@@ -44,7 +88,7 @@ impl App {
             inbox.unread += fresh.iter().filter(|e| !e.flags.seen).count();
         }
 
-        self.notify_new_mail(&fresh);
+        self.notify_new_mail(&batch.account, &fresh);
         self.set_toast(format!("{} new message(s)", fresh.len()), ToastKind::Info);
     }
 
@@ -85,11 +129,11 @@ impl App {
     }
 
     /// Fire one coalesced desktop notification for a batch, honoring config.
-    fn notify_new_mail(&self, envelopes: &[Envelope]) {
+    /// `account` is the owning account's name (not necessarily the focused one).
+    fn notify_new_mail(&self, account: &str, envelopes: &[Envelope]) {
         if !self.config.notifications.enabled || envelopes.is_empty() {
             return;
         }
-        let account = self.active_account_name();
         if let Err(e) = self.services.notifier.new_mail_batch(
             account,
             envelopes,

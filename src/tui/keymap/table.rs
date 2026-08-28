@@ -129,6 +129,8 @@ static BINDINGS: &[Binding] = &[
     b(Ctx::List, &[Key::ch('j')], Action::MoveDown, "j", "down"),
     b(Ctx::List, &[Key::ch('k')], Action::MoveUp, "k", "up"),
     b(Ctx::List, &[Key::ch('G')], Action::MoveLast, "G", "last"),
+    b(Ctx::List, &[Key::page_up()], Action::PageUp, "PgUp", "page up"),
+    b(Ctx::List, &[Key::page_down()], Action::PageDown, "PgDn", "page down"),
     b(
         Ctx::List,
         &[Key::ch('g'), Key::ch('g')],
@@ -233,6 +235,8 @@ static BINDINGS: &[Binding] = &[
         "gg",
         "top",
     ),
+    b(Ctx::Reader, &[Key::cc('u')], Action::ScrollHalfUp, "C-u", "half page up"),
+    b(Ctx::Reader, &[Key::cc('d')], Action::ScrollHalfDown, "C-d", "half page down"),
     b(Ctx::Reader, &[Key::ch('r')], Action::Reply, "r", "reply"),
     b(
         Ctx::Reader,
@@ -284,13 +288,6 @@ static BINDINGS: &[Binding] = &[
         Action::FocusNext,
         "Tab/jk",
         "move field",
-    ),
-    b(
-        Ctx::Compose,
-        &[Key::ch('e')],
-        Action::ExternalEditor,
-        "e",
-        "edit field / body",
     ),
     b(
         Ctx::Compose,
