@@ -457,15 +457,23 @@ impl App {
         self.settings_reset_focus_to_first();
     }
 
-    /// Point form focus at the first field for the current provider's auth kind.
+    /// Point form focus at the opening field for the current provider's auth
+    /// kind. OAuth accounts land on the Authorize button (the primary action);
+    /// password accounts start on the first editable field.
     fn settings_reset_focus_to_first(&mut self) {
-        let first = self
-            .form_focus_order()
-            .first()
-            .copied()
-            .unwrap_or(SettingsFocus::Provider);
+        let order = self.form_focus_order();
+        let target = if self.form_provider_is_oauth() {
+            order
+                .iter()
+                .copied()
+                .find(|f| *f == SettingsFocus::Authorize)
+                .or_else(|| order.first().copied())
+        } else {
+            order.first().copied()
+        }
+        .unwrap_or(SettingsFocus::Provider);
         if let Some(state) = &mut self.settings {
-            state.focus = first;
+            state.focus = target;
         }
     }
 
