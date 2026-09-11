@@ -49,6 +49,16 @@ pub const NARROW_WIDTH: u16 = 90;
 /// the middle of the current page - well before the user reaches the bottom.
 const PREFETCH_ROWS: usize = 50;
 
+/// Whether a message timestamp (unix seconds) falls on the local calendar day,
+/// used to decide which recent messages to pre-warm into the body cache.
+pub(crate) fn is_today(ts: i64) -> bool {
+    use chrono::{Local, TimeZone};
+    Local
+        .timestamp_opt(ts, 0)
+        .single()
+        .is_some_and(|dt| dt.date_naive() == Local::now().date_naive())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
     Main,

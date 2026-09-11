@@ -189,6 +189,9 @@ Field navigation uses `Tab`/`j`/`k`; press `e` to start typing into the focused 
 
 Config lives at `~/.config/pesan/config.yaml` (see [File locations](#file-locations)). Unknown fields are rejected, so typos surface as load errors. The file is fully commented; see [`example.config.yaml`](example.config.yaml) for the annotated reference. Summary:
 
+**Modular drop-ins.** Any `*.yaml`/`*.yml` file placed in `~/.config/pesan/config.d/` is merged over `config.yaml`, sorted by file name (later files win). Tables deep-merge and scalars/arrays are replaced, so a fragment can add or override individual keys without duplicating the rest - e.g. keep providers in `config.d/providers.yaml` and keybindings in `config.d/keymap.yaml`. The `config.d/` directory is created empty on first run.
+
+
 ### `providers`
 
 OAuth app + server definitions, shared across accounts. Each account references a provider by key. Hosts and OAuth credentials are defined **only** here (never duplicated in the database).

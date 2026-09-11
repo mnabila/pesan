@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 
 pub const APP_NAME: &str = "pesan";
 const CONFIG_FILE: &str = "config.yaml";
+/// Drop-in directory: every `*.yaml`/`*.yml` fragment here is merged over
+/// `config.yaml` (sorted by file name, later files win), `/etc/*.d`-style.
+const CONFIG_D_DIR: &str = "config.d";
 
 fn project_dirs() -> Result<ProjectDirs> {
     ProjectDirs::from("", "", APP_NAME).context("unable to determine platform directories")
@@ -15,6 +18,11 @@ fn project_dirs() -> Result<ProjectDirs> {
 
 pub fn config_dir() -> Result<PathBuf> {
     Ok(project_dirs()?.config_dir().to_path_buf())
+}
+
+/// The `config.d/` drop-in directory under the config dir.
+pub fn config_d_dir() -> Result<PathBuf> {
+    Ok(config_dir()?.join(CONFIG_D_DIR))
 }
 
 pub fn data_dir() -> Result<PathBuf> {
@@ -133,9 +141,11 @@ impl KeySpecs {
 }
 
 impl Config {
-    /// Load the app config from `~/.config/pesan/config.yaml`. On first run the
-    /// directory and a documented default config are written. Missing optional
-    /// sections fall back to defaults. Returns the loaded config.
+    /// Load the app config from `~/.config/pesan/config.yaml`, merging any
+    /// `config.d/*.yaml` drop-in fragments on top (sorted by file name, later
+    /// wins). On first run the config dir, a documented default `config.yaml`,
+    /// and an empty `config.d/` directory are written. Missing optional sections
+    /// fall back to defaults. Returns the loaded config.
     pub fn load() -> Result<Self> {
         let dir = config_dir()?;
         fs::create_dir_all(&dir).context("create config dir")?;
@@ -146,22 +156,58 @@ impl Config {
                 .with_context(|| format!("write default {}", path.display()))?;
             tracing::debug!("wrote default config to {}", path.display());
         }
-        Self::from_file(&path)
+
+        // Ensure the drop-in dir exists so users can discover it, then merge any
+        // fragments it holds over the base file.
+        let config_d = config_d_dir()?;
+        fs::create_dir_all(&config_d).context("create config.d dir")?;
+        let fragments = config_d_fragments(&config_d);
+        Self::from_sources(&path, &fragments)
     }
 
-    /// Deserialize a config file through `config-rs` (YAML source). Kept separate
-    /// so it can be exercised directly in tests.
-    pub fn from_file(path: &std::path::Path) -> Result<Self> {
-        let settings = config::Config::builder()
-            .add_source(config::File::from(path))
+    /// Deserialize `base` and merge each of `fragments` (in order) over it via
+    /// `config-rs`, which deep-merges tables and replaces scalars/arrays, so a
+    /// fragment can add or override individual nested keys. `#[serde(deny_unknown_fields)]`
+    /// still guards the merged result, so a stray key in any file errors out.
+    pub fn from_sources(base: &Path, fragments: &[PathBuf]) -> Result<Self> {
+        let mut builder = config::Config::builder().add_source(config::File::from(base));
+        for frag in fragments {
+            builder = builder.add_source(config::File::from(frag.as_path()));
+        }
+        let settings = builder
             .build()
-            .with_context(|| format!("load {}", path.display()))?;
+            .with_context(|| format!("load {}", base.display()))?;
         let config: Self = settings
             .try_deserialize()
-            .with_context(|| format!("parse {}", path.display()))?;
-        tracing::debug!("config loaded from {}", path.display());
+            .with_context(|| format!("parse {}", base.display()))?;
+        tracing::debug!(
+            "config loaded from {} (+{} fragment(s))",
+            base.display(),
+            fragments.len()
+        );
         Ok(config)
     }
+}
+
+/// Collect the `*.yaml`/`*.yml` fragments in a `config.d/` directory, sorted by
+/// file name so ordering (e.g. `10-ui.yaml` before `20-work.yaml`) is
+/// deterministic. Returns empty when the directory is absent or unreadable -
+/// a missing drop-in dir is not an error.
+fn config_d_fragments(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut files: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.is_file()
+                && p.extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| e.eq_ignore_ascii_case("yaml") || e.eq_ignore_ascii_case("yml"))
+        })
+        .collect();
+    files.sort();
+    files
 }
 
 // Note: there is intentionally no `save()`. `config.yaml` is user-owned (it
@@ -281,6 +327,11 @@ pub struct Ui {
     #[serde(default = "default_statusbar_position")]
     pub statusbar_position: String,
     pub poll_interval_secs: u64,
+    /// How many of today's messages per folder have their bodies pre-warmed into
+    /// the cache (newest-first) so opening a recent one is instant. `0` disables
+    /// prefetch. Kept small so a busy day never floods the single IMAP worker.
+    #[serde(default = "default_prefetch_today_count")]
+    pub prefetch_today_count: usize,
 }
 
 fn default_account_label() -> String {
@@ -295,6 +346,10 @@ fn default_statusbar_position() -> String {
     "bottom".to_string()
 }
 
+fn default_prefetch_today_count() -> usize {
+    30
+}
+
 impl Default for Ui {
     fn default() -> Self {
         Self {
@@ -305,6 +360,7 @@ impl Default for Ui {
             border_type: default_border_type(),
             statusbar_position: default_statusbar_position(),
             poll_interval_secs: 120,
+            prefetch_today_count: default_prefetch_today_count(),
         }
     }
 }
@@ -433,7 +489,7 @@ mod tests {
     }
 
     /// End-to-end check of the real load path: the documented default config
-    /// parses through config-rs (`Config::from_file`), covering untagged enums
+    /// parses through config-rs (`Config::from_sources`), covering untagged enums
     /// (keybinding), fixed arrays (layout), and the custom themes map.
     #[test]
     fn default_yaml_loads_through_config_rs() {
@@ -441,7 +497,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.yaml");
         fs::write(&path, DEFAULT_YAML).unwrap();
-        let parsed = Config::from_file(&path).unwrap();
+        let parsed = Config::from_sources(&path, &[]).unwrap();
         assert_eq!(parsed.ui.theme, "gruvbox");
         assert_eq!(parsed.ui.layout, [2, 8]);
         assert_eq!(parsed.ui.border_type, "plain");
@@ -453,6 +509,86 @@ mod tests {
             parsed.keybinding["list"]["open_message"].sequences(),
             vec!["enter".to_string(), "o".to_string()],
         );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A per-test scratch dir with the default `config.yaml` written as the base.
+    /// Returns (dir, base path). Caller writes fragments into `dir/config.d`.
+    fn scratch(tag: &str) -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("pesan-cfgd-{}-{tag}", std::process::id()));
+        fs::remove_dir_all(&dir).ok();
+        fs::create_dir_all(dir.join(CONFIG_D_DIR)).unwrap();
+        let base = dir.join(CONFIG_FILE);
+        fs::write(&base, DEFAULT_YAML).unwrap();
+        (dir, base)
+    }
+
+    #[test]
+    fn fragment_overrides_base_scalar_and_keeps_siblings() {
+        let (dir, base) = scratch("override");
+        fs::write(dir.join(CONFIG_D_DIR).join("10-ui.yaml"), "ui:\n  theme: light\n").unwrap();
+        let frags = config_d_fragments(&dir.join(CONFIG_D_DIR));
+        let parsed = Config::from_sources(&base, &frags).unwrap();
+        // Overridden leaf wins...
+        assert_eq!(parsed.ui.theme, "light");
+        // ...and untouched base `ui` fields survive (deep merge, not replace).
+        assert_eq!(parsed.ui.layout, [2, 8]);
+        assert_eq!(parsed.ui.statusbar_position, "bottom");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn fragment_adds_to_providers_map() {
+        let (dir, base) = scratch("providers");
+        fs::write(
+            dir.join(CONFIG_D_DIR).join("work.yaml"),
+            "providers:\n  work:\n    imap:\n      host: imap.work.test\n      port: 993\n    smtp:\n      host: smtp.work.test\n      port: 465\n",
+        )
+        .unwrap();
+        let frags = config_d_fragments(&dir.join(CONFIG_D_DIR));
+        let parsed = Config::from_sources(&base, &frags).unwrap();
+        // Base providers survive and the fragment's is added.
+        assert!(parsed.providers.contains_key("gmail"));
+        assert!(parsed.providers.contains_key("outlook"));
+        assert_eq!(parsed.providers["work"].imap.host, "imap.work.test");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn later_fragment_wins_by_filename_order() {
+        let (dir, base) = scratch("order");
+        let d = dir.join(CONFIG_D_DIR);
+        fs::write(d.join("20-late.yaml"), "ui:\n  theme: late\n").unwrap();
+        fs::write(d.join("10-early.yaml"), "ui:\n  theme: early\n").unwrap();
+        let frags = config_d_fragments(&d);
+        // Discovery is sorted by name regardless of write order.
+        assert!(frags[0].ends_with("10-early.yaml"));
+        assert!(frags[1].ends_with("20-late.yaml"));
+        let parsed = Config::from_sources(&base, &frags).unwrap();
+        assert_eq!(parsed.ui.theme, "late");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn missing_or_empty_config_d_loads_base_only() {
+        let (dir, base) = scratch("empty");
+        // Empty config.d (created by scratch, no fragments) -> base only.
+        let frags = config_d_fragments(&dir.join(CONFIG_D_DIR));
+        assert!(frags.is_empty());
+        let parsed = Config::from_sources(&base, &frags).unwrap();
+        assert_eq!(parsed.ui.theme, "gruvbox");
+        // A nonexistent dir is also fine (not an error).
+        assert!(config_d_fragments(&dir.join("nope.d")).is_empty());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn unknown_key_in_fragment_errors() {
+        let (dir, base) = scratch("unknown");
+        fs::write(dir.join(CONFIG_D_DIR).join("bad.yaml"), "not_a_real_section: 1\n").unwrap();
+        let frags = config_d_fragments(&dir.join(CONFIG_D_DIR));
+        // deny_unknown_fields still guards the merged value.
+        assert!(Config::from_sources(&base, &frags).is_err());
         fs::remove_dir_all(&dir).ok();
     }
 }

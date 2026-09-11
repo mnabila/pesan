@@ -90,6 +90,17 @@ impl App {
 
         self.notify_new_mail(&batch.account, &fresh);
         self.set_toast(format!("{} new message(s)", fresh.len()), ToastKind::Info);
+
+        // Newly-arrived mail is today's by definition: pre-warm its bodies on the
+        // background queue so the user opens it instantly.
+        let cap = self.config.ui.prefetch_today_count;
+        if self.live && viewing_inbox && cap > 0 {
+            let uids: Vec<u64> = fresh.iter().take(cap).map(|e| e.uid).collect();
+            self.task_ctx().spawn(Effect::PrefetchBodies {
+                folder: self.selected_folder_name().to_string(),
+                uids,
+            });
+        }
     }
 
     /// Apply a background folder refresh (live `list_messages` done off the UI
@@ -113,6 +124,9 @@ impl App {
             self.selected_message = pos;
         }
         self.refresh_folder_unread_counts();
+        // Pre-warm today's bodies from the fresh list so opening a recent message
+        // is instant; already-cached ones are skipped in the effect.
+        self.spawn_prefetch_today(&done.folder);
     }
 
     /// Apply a background message-body fetch. Dropped if the user has moved off
@@ -164,6 +178,9 @@ impl App {
         self.older_exhausted = false;
         self.refresh_display_list(None);
         self.spawn_folder_refresh(&name);
+        // Warm today's bodies from whatever is cached now; the refresh below
+        // re-runs this with the fresh list once it lands.
+        self.spawn_prefetch_today(&name);
     }
 
     /// Read a folder's envelopes straight from the offline cache. Returns an
@@ -189,6 +206,36 @@ impl App {
         }
         self.task_ctx().spawn(Effect::RefreshFolder {
             folder: folder.to_string(),
+        });
+    }
+
+    /// Warm the cache with the bodies of messages that arrived today, so opening
+    /// a recent one is instant (a cache hit) instead of waiting on a live fetch.
+    /// Runs on the low-priority queue, so an interactive open always jumps ahead;
+    /// already-cached messages are skipped in the effect. Bounded by
+    /// [`PREFETCH_TODAY_CAP`] so a busy day never floods the worker. A no-op when
+    /// offline.
+    fn spawn_prefetch_today(&self, folder: &str) {
+        if !self.live {
+            return;
+        }
+        let cap = self.config.ui.prefetch_today_count;
+        if cap == 0 {
+            return;
+        }
+        let uids: Vec<u64> = self
+            .envelopes
+            .iter()
+            .filter(|e| is_today(e.date))
+            .take(cap)
+            .map(|e| e.uid)
+            .collect();
+        if uids.is_empty() {
+            return;
+        }
+        self.task_ctx().spawn(Effect::PrefetchBodies {
+            folder: folder.to_string(),
+            uids,
         });
     }
 

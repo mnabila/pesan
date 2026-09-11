@@ -1,15 +1,50 @@
-/// Readable body for the reader (and the searchable, cached copy). Prefers the
+/// Readable body for the reader (and the searchable, cached copy). Prefers an
 /// HTML part - usually the real content - rendered to Markdown (headings,
-/// emphasis, lists, links, tables); falls back to the text/plain part, else
-/// empty.
+/// emphasis, lists, links, tables); falls back to a text/plain part. Some mail
+/// nests the readable part (multipart/related, forwarded messages) so that part
+/// index 0 is empty, so every HTML then text part is tried before giving up -
+/// otherwise the reader shows a blank pane for a message that does have text.
+/// When there is genuinely no text part, the attachment list is summarized so
+/// the pane still shows something useful.
 pub(crate) fn extract_body(msg: &mail_parser::Message<'_>) -> String {
-    if let Some(html) = msg.body_html(0) {
-        return normalize(&render_html(&html));
+    for i in 0..msg.html_body_count() {
+        if let Some(html) = msg.body_html(i) {
+            let body = normalize(&render_html(&html));
+            if !body.is_empty() {
+                return body;
+            }
+        }
     }
-    if let Some(text) = msg.body_text(0) {
-        return normalize(&text);
+    for i in 0..msg.text_body_count() {
+        if let Some(text) = msg.body_text(i) {
+            let body = normalize(&text);
+            if !body.is_empty() {
+                return body;
+            }
+        }
     }
-    String::new()
+    attachment_summary(msg)
+}
+
+/// Fallback body for a message with no readable text part (e.g. an attachment-
+/// only mail or a bare calendar invite): list the attachment names so the reader
+/// pane is never mysteriously blank. Empty when there is nothing at all to show.
+fn attachment_summary(msg: &mail_parser::Message<'_>) -> String {
+    use mail_parser::MimeHeaders;
+    let names: Vec<&str> = msg
+        .attachments()
+        .filter_map(|part| part.attachment_name())
+        .collect();
+    if names.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("(This message has no text content.)\n\nAttachments:\n");
+    for name in names {
+        out.push_str("- ");
+        out.push_str(name);
+        out.push('\n');
+    }
+    out.trim_end().to_string()
 }
 
 /// Collapse runs of blank lines to one and trim trailing whitespace so the
@@ -133,6 +168,20 @@ mod tests {
             !body.contains("plain fallback"),
             "should prefer HTML over the text/plain part: {body:?}"
         );
+    }
+
+    #[test]
+    fn extract_body_summarizes_attachments_when_no_text() {
+        // An attachment-only message (no text/html part) must not render blank.
+        let raw = b"From: a@b.com\r\nSubject: Invoice\r\nMIME-Version: 1.0\r\n\
+            Content-Type: multipart/mixed; boundary=\"B\"\r\n\r\n\
+            --B\r\nContent-Type: application/pdf\r\n\
+            Content-Disposition: attachment; filename=\"invoice.pdf\"\r\n\r\n%PDF-1.4\r\n\
+            --B--\r\n";
+        let msg = MessageParser::default().parse(raw.as_slice()).unwrap();
+        let body = extract_body(&msg);
+        assert!(body.contains("no text content"), "unexpected body: {body:?}");
+        assert!(body.contains("invoice.pdf"), "attachment not listed: {body:?}");
     }
 
     #[test]

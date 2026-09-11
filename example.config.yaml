@@ -2,43 +2,12 @@
 # No per-user account rows (those live in pesan.db) and no user tokens (keychain).
 # Accounts reference a provider here by key; hosts and OAuth credentials are NOT
 # duplicated in the database.
-
-providers: # OAuth app + server definitions, shared across accounts
-  gmail:
-    imap: { host: imap.gmail.com, port: 993 }
-    smtp: { host: smtp.gmail.com, port: 465 }
-    oauth:
-      auth_url: "https://accounts.google.com/o/oauth2/v2/auth"
-      token_url: "https://oauth2.googleapis.com/token"
-      scopes: ["https://mail.google.com/"]
-      client_id: "" # e.g. "xxxx.apps.googleusercontent.com"
-      client_secret: "" # Gmail "Desktop app" secret (non-confidential for installed apps)
-      # client_secret can also be given via env: ${PESAN_GMAIL_SECRET}
-      # Redirect URI is not configured: pesan advertises http://localhost (no
-      # listener) and you paste the redirect URL back in. Register http://localhost
-      # on the OAuth client ("Desktop app" accepts loopback URLs).
-  outlook: # Outlook.com / Microsoft 365
-    imap: { host: outlook.office365.com, port: 993 }
-    smtp: { host: smtp.office365.com, port: 587 }
-    oauth:
-      auth_url: "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
-      token_url: "https://login.microsoftonline.com/common/oauth2/v2.0/token"
-      scopes:
-        - "https://outlook.office.com/IMAP.AccessAsUser.All"
-        - "https://outlook.office.com/SMTP.Send"
-        - "offline_access"
-      client_id: "" # Azure app (client) id, e.g. "00000000-0000-0000-0000-000000000000"
-      client_secret: "" # blank for a public/desktop app registration (PKCE)
-      # Redirect URI is not configured: pesan advertises http://localhost (no
-      # listener) and you paste the redirect URL back in. Register http://localhost
-      # on the app ("Mobile and desktop applications" allows loopback URLs).
-  # Password-login provider: omit the `oauth` block entirely. Accounts on such a
-  # provider authenticate with IMAP/SMTP LOGIN using a password you enter in the
-  # account form (stored in the OS keyring). Use an app password if the provider
-  # requires one.
-  # fastmail:
-  #   imap: { host: imap.fastmail.com, port: 993 }
-  #   smtp: { host: smtp.fastmail.com, port: 465 }
+#
+# Modular drop-ins: any *.yaml / *.yml file in the sibling config.d/ directory is
+# merged over this file, sorted by file name (later files win). Tables deep-merge
+# and scalars/arrays are replaced, so a fragment can add or override individual
+# keys - e.g. config.d/providers.yaml for extra `providers:`, or config.d/keymap.yaml
+# for `keybinding:` overrides - without duplicating the rest of this file.
 
 ui:
   theme: gruvbox # dark | light | mono, or any custom theme name below
@@ -48,6 +17,7 @@ ui:
   border_type: plain # pane border weight: plain | rounded | thick | double
   statusbar_position: bottom # single statusbar placement: top | bottom
   poll_interval_secs: 120 # per-account new-mail watcher cadence (fallback poll when IMAP IDLE is unavailable)
+  prefetch_today_count: 30 # bodies of today's newest N messages pre-warmed per folder for instant open (0 disables)
 
 notifications:
   enabled: true # desktop notification on new mail
@@ -154,3 +124,40 @@ keybinding:
   confirm: # yes/no dialog
     confirm_yes: [y, enter]
     confirm_no: [n, esc]
+
+providers: # OAuth app + server definitions, shared across accounts
+  gmail:
+    imap: { host: imap.gmail.com, port: 993 }
+    smtp: { host: smtp.gmail.com, port: 465 }
+    oauth:
+      auth_url: "https://accounts.google.com/o/oauth2/v2/auth"
+      token_url: "https://oauth2.googleapis.com/token"
+      scopes: ["https://mail.google.com/"]
+      client_id: "" # e.g. "xxxx.apps.googleusercontent.com"
+      client_secret: "" # Gmail "Desktop app" secret (non-confidential for installed apps)
+      # client_secret can also be given via env: ${PESAN_GMAIL_SECRET}
+      # Redirect URI is not configured: pesan advertises http://localhost (no
+      # listener) and you paste the redirect URL back in. Register http://localhost
+      # on the OAuth client ("Desktop app" accepts loopback URLs).
+  outlook: # Outlook.com / Microsoft 365
+    imap: { host: outlook.office365.com, port: 993 }
+    smtp: { host: smtp.office365.com, port: 587 }
+    oauth:
+      auth_url: "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
+      token_url: "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+      scopes:
+        - "https://outlook.office.com/IMAP.AccessAsUser.All"
+        - "https://outlook.office.com/SMTP.Send"
+        - "offline_access"
+      client_id: "" # Azure app (client) id, e.g. "00000000-0000-0000-0000-000000000000"
+      client_secret: "" # blank for a public/desktop app registration (PKCE)
+      # Redirect URI is not configured: pesan advertises http://localhost (no
+      # listener) and you paste the redirect URL back in. Register http://localhost
+      # on the app ("Mobile and desktop applications" allows loopback URLs).
+  # Password-login provider: omit the `oauth` block entirely. Accounts on such a
+  # provider authenticate with IMAP/SMTP LOGIN using a password you enter in the
+  # account form (stored in the OS keyring). Use an app password if the provider
+  # requires one.
+  # fastmail:
+  #   imap: { host: imap.fastmail.com, port: 993 }
+  #   smtp: { host: smtp.fastmail.com, port: 465 }

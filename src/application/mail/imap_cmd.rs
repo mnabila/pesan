@@ -92,6 +92,14 @@ impl ImapHandle {
         call_on(&self.hi, |tx| Cmd::FetchMessage(folder, uid, tx)).await
     }
 
+    /// Background: fetch a message body to warm the cache (low priority), so a
+    /// later open of a recent message is an instant cache hit. Runs on the `lo`
+    /// queue behind any interactive open.
+    pub async fn fetch_message_bg(&self, folder: &str, uid: u64) -> Result<Message> {
+        let folder = folder.to_string();
+        call_on(&self.lo, |tx| Cmd::FetchMessage(folder, uid, tx)).await
+    }
+
     pub async fn set_seen(&self, folder: &str, uid: u64, seen: bool) -> Result<()> {
         let folder = folder.to_string();
         call_on(&self.hi, |tx| Cmd::SetSeen(folder, uid, seen, tx)).await

@@ -126,6 +126,39 @@ impl TaskCtx {
                         },
                     )));
                 }
+                Effect::PrefetchBodies { folder, uids } => {
+                    let Some(handle) = ctx.handle else {
+                        return;
+                    };
+                    let Some(id) = ctx.account_id else {
+                        return;
+                    };
+                    for uid in uids {
+                        // Skip anything already fully cached (body + headers): an
+                        // open of it is instant without touching the network.
+                        if let Ok(Some(msg)) = ctx.services.cache.load_message(id, &folder, uid).await
+                            && !msg.body.is_empty()
+                            && msg.raw_headers.is_some()
+                        {
+                            continue;
+                        }
+                        // Background fetch (lo queue) so an interactive open always
+                        // jumps ahead. Errors are silent - this is best-effort warmup.
+                        if let Ok(msg) = handle.fetch_message_bg(&folder, uid).await {
+                            let _ = ctx
+                                .services
+                                .cache
+                                .store_body(
+                                    id,
+                                    &folder,
+                                    uid,
+                                    &msg.body,
+                                    msg.raw_headers.as_deref(),
+                                )
+                                .await;
+                        }
+                    }
+                }
                 Effect::DeleteOnServer { folder, uids, dest } => {
                     let Some(handle) = ctx.handle else {
                         return;

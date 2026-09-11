@@ -20,6 +20,12 @@ pub enum Effect {
     /// Fetch one message body, store it in the cache, and deliver it as a
     /// message-fetched event.
     FetchMessage { folder: String, env: Envelope },
+    /// Warm the cache with the bodies of recently-arrived messages (low
+    /// priority), so opening one is an instant cache hit. Each uid already
+    /// fully cached is skipped; the rest are fetched with `BODY.PEEK` (no
+    /// `\Seen`) on the background queue. Delivers no event - the bodies just
+    /// land in SQLite.
+    PrefetchBodies { folder: String, uids: Vec<u64> },
     /// Server-side deletes (or moves to `dest`, i.e. Archive), run low-priority
     /// after an optimistic local removal. Tracked as a job.
     DeleteOnServer {

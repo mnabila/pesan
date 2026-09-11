@@ -84,6 +84,11 @@ pub(super) fn worker_main(
         // any queued background sweep (it waits at most for the one command
         // already in flight, never the whole sweep).
         let mut wedged = false;
+        // The mailbox currently SELECTed on this session, so UID ops (fetch,
+        // flag, delete, move) can skip a redundant round-trip SELECT when the
+        // right mailbox is already selected. `None` = unknown/unselected, which
+        // forces a SELECT on the next op that needs one.
+        let mut current: Option<String> = None;
         loop {
             let cmd = tokio::select! {
                 biased;
@@ -98,6 +103,7 @@ pub(super) fn worker_main(
                 &params,
                 &mut access_token,
                 &mut token_expires_at,
+                &mut current,
                 cmd,
             )
             .await
@@ -128,8 +134,28 @@ async fn handle_cmd(
     params: &ConnectParams,
     access_token: &mut String,
     token_expires_at: &mut i64,
+    current: &mut Option<String>,
     cmd: Cmd,
 ) -> bool {
+    /// SELECT `$folder` only if it is not already the selected mailbox, tracking
+    /// the result in `current`. UID-addressed ops are correct regardless of how
+    /// fresh the mailbox state is, so skipping the SELECT is safe; `current` is
+    /// cleared first so a failed SELECT never leaves a stale mailbox recorded.
+    macro_rules! ensure_selected {
+        ($folder:expr) => {{
+            let folder: &str = $folder;
+            if current.as_deref() == Some(folder) {
+                Ok(())
+            } else {
+                *current = None;
+                let r = select_folder(session, folder).await;
+                if r.is_ok() {
+                    *current = Some(folder.to_string());
+                }
+                r
+            }
+        }};
+    }
     /// Await `$fut` under [`OP_TIMEOUT`]; on timeout send a timeout error on
     /// `$reply` and return `false` from `handle_cmd`.
     macro_rules! bounded {
@@ -163,20 +189,28 @@ async fn handle_cmd(
                 }
             }
         }
-        Cmd::ListMessages(folder, reply) => bounded!(reply, list_messages(session, &folder)),
-        Cmd::ListMessagesWindow(folder, offset, limit, reply) => {
-            bounded!(reply, list_messages_window(session, &folder, offset, limit))
-        }
+        Cmd::ListMessages(folder, reply) => bounded!(reply, async {
+            // These SELECT internally to read a fresh EXISTS count; record (or on
+            // failure clear) the resulting mailbox so later ops can skip re-SELECT.
+            let r = list_messages(session, &folder).await;
+            *current = r.is_ok().then(|| folder.clone());
+            r
+        }),
+        Cmd::ListMessagesWindow(folder, offset, limit, reply) => bounded!(reply, async {
+            let r = list_messages_window(session, &folder, offset, limit).await;
+            *current = r.is_ok().then(|| folder.clone());
+            r
+        }),
         Cmd::FetchMessage(folder, uid, reply) => bounded!(reply, async {
-            select_folder(session, &folder).await?;
+            ensure_selected!(&folder)?;
             fetch_message(session, uid).await
         }),
         Cmd::SetSeen(folder, uid, on, reply) => bounded!(reply, async {
-            select_folder(session, &folder).await?;
+            ensure_selected!(&folder)?;
             store_flag(session, uid, "\\Seen", on).await
         }),
         Cmd::SetFlagged(folder, uid, on, reply) => bounded!(reply, async {
-            select_folder(session, &folder).await?;
+            ensure_selected!(&folder)?;
             store_flag(session, uid, "\\Flagged", on).await
         }),
         Cmd::Send(draft, reply) => {
@@ -193,11 +227,11 @@ async fn handle_cmd(
             );
         }
         Cmd::Delete(folder, uid, reply) => bounded!(reply, async {
-            select_folder(session, &folder).await?;
+            ensure_selected!(&folder)?;
             delete_uid(session, uid).await
         }),
         Cmd::MoveTo(src, uid, dest, reply) => bounded!(reply, async {
-            select_folder(session, &src).await?;
+            ensure_selected!(&src)?;
             move_uid(session, uid, &dest).await
         }),
     }
