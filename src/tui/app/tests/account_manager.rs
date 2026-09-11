@@ -695,8 +695,9 @@ async fn account_form_field_edit_swallows_question_mark() {
     let mut app = test_app().await;
     send_key!(app, Key::ch('S'));
     send_key!(app, Key::ch('a')); // new account -> provider chooser
-    send_key!(app, Key::enter()); // pick provider -> form (gmail: focus Name)
-    send_key!(app, Key::ch('e')); // start typing into Name (already focused)
+    send_key!(app, Key::enter()); // pick provider -> form (gmail OAuth: focus Authorize)
+    send_key!(app, Key::ch('j')); // wrap forward to the Name field
+    send_key!(app, Key::ch('e')); // start typing into Name
     assert!(app.settings.as_ref().unwrap().field_editing);
     send_key!(app, Key::ch('?')); // must reach the field, not open help
     assert!(!app.help_open);
@@ -838,12 +839,19 @@ async fn provider_dropdown_opens_and_selects() {
 
     let settings = app.settings.as_ref().unwrap();
     assert!(settings.editing);
-    // gmail is OAuth, so the edit form starts on the Provider field.
-    assert_eq!(settings.focus, SettingsFocus::Provider);
+    // gmail is OAuth, so the edit form opens on the Authorize button.
+    assert_eq!(settings.focus, SettingsFocus::Authorize);
     let n = settings.providers.len();
     assert!(n > 0, "config must define at least one provider");
 
-    // Edit mode reuses the provider chooser to switch providers. Open it with `o`.
+    // Edit mode reuses the provider chooser to switch providers. Move focus from
+    // the Authorize button to the Provider field (j wraps forward), then open the
+    // chooser with `o`.
+    send_key!(app, Key::ch('j'));
+    assert_eq!(
+        app.settings.as_ref().unwrap().focus,
+        SettingsFocus::Provider
+    );
     send_key!(app, Key::ch('o'));
     let settings = app.settings.as_ref().unwrap();
     assert!(settings.choosing_provider, "chooser should open on `o`");
@@ -861,7 +869,8 @@ async fn provider_dropdown_opens_and_selects() {
     send_key!(app, Key::enter());
     let settings = app.settings.as_ref().unwrap();
     assert!(!settings.choosing_provider, "chooser should close on Enter");
-    assert_eq!(settings.focus, SettingsFocus::Provider);
+    // Confirming the chooser resets focus; OAuth lands on the Authorize button.
+    assert_eq!(settings.focus, SettingsFocus::Authorize);
     let form = settings.form.as_ref().unwrap();
     let chosen = settings.choose_idx;
     assert_eq!(form.provider_idx, chosen, "selected provider applied to form");
@@ -872,8 +881,14 @@ async fn account_form_hl_moves_focus_left_right() {
     let mut app = test_app().await;
     send_key!(app, Key::ch('S'));
     send_key!(app, Key::ch('a')); // add account -> provider chooser
-    send_key!(app, Key::enter()); // pick provider -> form (focus Name)
+    send_key!(app, Key::enter()); // pick provider -> form (OAuth: focus Authorize)
     // New-account OAuth order is a 2-column grid: Name | IsDefault, then Authorize.
+    // The form opens on Authorize; j wraps forward to Name to start the grid test.
+    assert_eq!(
+        app.settings.as_ref().unwrap().focus,
+        SettingsFocus::Authorize
+    );
+    send_key!(app, Key::ch('j'));
     assert_eq!(app.settings.as_ref().unwrap().focus, SettingsFocus::Name);
 
     // `l` moves focus to the right column (IsDefault).

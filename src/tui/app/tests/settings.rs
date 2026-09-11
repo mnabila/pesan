@@ -18,8 +18,14 @@ async fn account_form_field_is_modal_e_edits_esc_exits() {
     let mut app = test_app().await;
     send_key!(app, Key::ch('S'));
     send_key!(app, Key::ch('a')); // add account -> provider chooser
-    send_key!(app, Key::enter()); // pick provider -> form (gmail: focus Name)
+    send_key!(app, Key::enter()); // pick provider -> form (gmail OAuth: focus Authorize)
     // j/k move between fields (not Tab). New-account OAuth order: Name -> Default -> Authorize.
+    // OAuth forms open on the Authorize button; j wraps forward to Name.
+    assert_eq!(
+        app.settings.as_ref().unwrap().focus,
+        SettingsFocus::Authorize
+    );
+    send_key!(app, Key::ch('j'));
     assert_eq!(app.settings.as_ref().unwrap().focus, SettingsFocus::Name);
     send_key!(app, Key::ch('j'));
     assert_eq!(
@@ -96,8 +102,13 @@ async fn settings_form_accepts_typed_input_through_keys() {
     send_key!(app, Key::ch('a')); // add account -> provider chooser
     send_key!(app, Key::enter()); // pick provider -> editing
     assert!(app.settings.as_ref().unwrap().editing);
-    // gmail is an OAuth provider; in the new-account wizard the form starts on
-    // Name (the provider was chosen on the chooser; email is auto-filled).
+    // gmail is an OAuth provider; the new-account form opens on the Authorize
+    // button. j wraps forward to Name (the first editable field).
+    assert_eq!(
+        app.settings.as_ref().unwrap().focus,
+        SettingsFocus::Authorize
+    );
+    send_key!(app, Key::ch('j'));
     assert_eq!(app.settings.as_ref().unwrap().focus, SettingsFocus::Name);
     // fields are modal: `e` starts typing on the focused Name field.
     send_key!(app, Key::ch('e'));
