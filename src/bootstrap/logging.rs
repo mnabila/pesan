@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use tracing_subscriber::fmt::time::ChronoLocal;
 use tracing_subscriber::EnvFilter;
 
 /// Log filter env vars, checked in order. Kept here so tests and callers agree
@@ -27,6 +28,7 @@ pub fn init_logging() -> Result<tracing_appender::non_blocking::WorkerGuard> {
 
     tracing_subscriber::fmt()
         .with_env_filter(resolve_filter())
+        .with_timer(ChronoLocal::rfc_3339())
         .with_writer(non_blocking)
         .with_ansi(false)
         .init();

@@ -534,6 +534,16 @@ impl App {
     }
 
     pub fn set_toast(&mut self, text: impl Into<String>, kind: ToastKind) {
+        let text = text.into();
+        // Mirror every toast into the log file so transient UI notices
+        // (SMTP/OAuth auth failures, sync errors) survive past the popup.
+        match kind {
+            ToastKind::Error => tracing::error!(target: "pesan::toast", "{text}"),
+            ToastKind::Warning => tracing::warn!(target: "pesan::toast", "{text}"),
+            ToastKind::Success | ToastKind::Info => {
+                tracing::info!(target: "pesan::toast", "{text}")
+            }
+        }
         self.toasts.push(Toast::new(text, kind));
         // Keep the backlog bounded so a flood of accounts can't grow forever.
         if self.toasts.len() > 5 {

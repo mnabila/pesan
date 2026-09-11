@@ -73,7 +73,7 @@ tokio-rustls = { version = "0.26", default-features = false, features = [
 ] }
 tracing = "0.1.44"
 tracing-appender = "0.2.5"
-tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "chrono"] }
 unicode-width = "0.2.2"
 url = "2"
 webpki-roots = "1"
