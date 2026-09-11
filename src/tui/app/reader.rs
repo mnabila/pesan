@@ -148,10 +148,12 @@ impl App {
         if !self.config.notifications.enabled || envelopes.is_empty() {
             return;
         }
+        let sound = self.config.notifications.sound_hint();
         if let Err(e) = self.services.notifier.new_mail_batch(
             account,
             envelopes,
             self.config.notifications.show_sender,
+            sound.as_ref(),
         ) {
             tracing::warn!("desktop notification failed: {e}");
         }

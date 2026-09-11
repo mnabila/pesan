@@ -23,7 +23,8 @@ notifications:
   enabled: true # desktop notification on new mail
   folders: [INBOX] # which mailboxes to watch
   show_sender: true # include From/subject in the notification body
-  sound: false
+  sound: false # play a sound with the notification (needs a daemon that supports sound hints)
+  # sound_file: ~/.config/pesan/new-mail.oga # specific sound file to play when sound is true; unset => default theme sound
 
 compose:
   editor:

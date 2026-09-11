@@ -4,7 +4,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::application::account::Account;
-use crate::application::ports::{AccountRepo, MailCache, Notifier, TokenStore};
+use crate::application::ports::{AccountRepo, MailCache, Notifier, SoundHint, TokenStore};
 use crate::domain::{Envelope, Folder, Message};
 
 /// In-memory [`AccountRepo`]: rows keyed by id, name-unique.
@@ -227,6 +227,7 @@ impl Notifier for FakeNotifier {
         _account: &str,
         _envelopes: &[Envelope],
         _show_sender: bool,
+        _sound: Option<&SoundHint>,
     ) -> Result<()> {
         Ok(())
     }

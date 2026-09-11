@@ -4,10 +4,28 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
+use crate::application::ports::SoundHint;
 use crate::domain::Envelope;
 
+/// Attach the configured sound to a notification via the matching freedesktop
+/// hint. A no-op when no sound is requested (`sound: false`).
+fn apply_sound(n: &mut notify_rust::Notification, sound: Option<&SoundHint>) {
+    if let Some(sound) = sound {
+        let hint = match sound {
+            SoundHint::Name(name) => notify_rust::Hint::SoundName(name.clone()),
+            SoundHint::File(path) => notify_rust::Hint::SoundFile(path.clone()),
+        };
+        n.hint(hint);
+    }
+}
+
 /// Desktop notification via freedesktop/D-Bus (notify-send on Linux).
-pub fn new_mail(account: &str, env: &Envelope, show_sender: bool) -> Result<()> {
+pub fn new_mail(
+    account: &str,
+    env: &Envelope,
+    show_sender: bool,
+    sound: Option<&SoundHint>,
+) -> Result<()> {
     let mut body = Vec::new();
     if show_sender {
         body.push(format!(
@@ -18,11 +36,12 @@ pub fn new_mail(account: &str, env: &Envelope, show_sender: bool) -> Result<()> 
     }
     body.push(env.subject.clone());
 
-    notify_rust::Notification::new()
-        .summary(format!("New mail - {account}").as_str())
+    let mut n = notify_rust::Notification::new();
+    n.summary(format!("New mail - {account}").as_str())
         .body(body.join("\n").as_str())
-        .appname("pesan")
-        .show()
+        .appname("pesan");
+    apply_sound(&mut n, sound);
+    n.show()
         .context("desktop notification failed (is a notification daemon running?)")?;
     Ok(())
 }
@@ -30,10 +49,15 @@ pub fn new_mail(account: &str, env: &Envelope, show_sender: bool) -> Result<()> 
 /// One coalesced notification for a batch of new messages, avoiding a burst of
 /// popups. A single message shows sender + subject; several show a count plus
 /// the newest sender/subject.
-pub fn new_mail_batch(account: &str, envelopes: &[Envelope], show_sender: bool) -> Result<()> {
+pub fn new_mail_batch(
+    account: &str,
+    envelopes: &[Envelope],
+    show_sender: bool,
+    sound: Option<&SoundHint>,
+) -> Result<()> {
     match envelopes {
         [] => return Ok(()),
-        [only] => return new_mail(account, only, show_sender),
+        [only] => return new_mail(account, only, show_sender, sound),
         _ => {}
     }
 
@@ -53,11 +77,12 @@ pub fn new_mail_batch(account: &str, envelopes: &[Envelope], show_sender: bool) 
     }
     body.push(format!("and {} more", envelopes.len() - 1));
 
-    notify_rust::Notification::new()
-        .summary(summary.as_str())
+    let mut n = notify_rust::Notification::new();
+    n.summary(summary.as_str())
         .body(body.join("\n").as_str())
-        .appname("pesan")
-        .show()
+        .appname("pesan");
+    apply_sound(&mut n, sound);
+    n.show()
         .context("desktop notification failed (is a notification daemon running?)")?;
     Ok(())
 }
@@ -120,12 +145,13 @@ impl crate::application::ports::Notifier for DesktopNotifier {
         account: &str,
         envelopes: &[Envelope],
         show_sender: bool,
+        sound: Option<&SoundHint>,
     ) -> Result<()> {
         if !self.reachable() {
             // No notification daemon running: don't trigger a (futile) desktop popup.
             return Ok(());
         }
-        match new_mail_batch(account, envelopes, show_sender) {
+        match new_mail_batch(account, envelopes, show_sender, sound) {
             Ok(()) => {
                 self.available.store(true, Ordering::Relaxed);
                 Ok(())

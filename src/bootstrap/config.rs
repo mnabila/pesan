@@ -373,6 +373,12 @@ pub struct Notifications {
     pub folders: Vec<String>,
     pub show_sender: bool,
     pub sound: bool,
+    /// Optional path to a sound file played with the notification (via the
+    /// freedesktop `sound-file` hint) when `sound` is true. `~` is expanded to
+    /// the home directory. When unset, `sound: true` falls back to a default
+    /// theme sound. Ignored entirely when `sound` is false.
+    #[serde(default)]
+    pub sound_file: Option<String>,
 }
 
 impl Default for Notifications {
@@ -382,8 +388,44 @@ impl Default for Notifications {
             folders: vec!["INBOX".into()],
             show_sender: true,
             sound: false,
+            sound_file: None,
         }
     }
+}
+
+/// Fallback freedesktop sound-theme name used when `sound: true` but no
+/// `sound_file` is configured.
+const DEFAULT_SOUND_NAME: &str = "message-new-instant";
+
+impl Notifications {
+    /// Resolve the configured sound into a [`SoundHint`], or `None` when sound
+    /// is disabled. A configured `sound_file` (with `~` expanded) becomes a
+    /// file hint; otherwise a default theme-sound name is used.
+    pub fn sound_hint(&self) -> Option<crate::application::ports::SoundHint> {
+        use crate::application::ports::SoundHint;
+        if !self.sound {
+            return None;
+        }
+        Some(match &self.sound_file {
+            Some(path) if !path.is_empty() => SoundHint::File(expand_tilde(path)),
+            _ => SoundHint::Name(DEFAULT_SOUND_NAME.to_string()),
+        })
+    }
+}
+
+/// Expand a leading `~` / `~/` to the user's home directory. Any other path is
+/// returned unchanged. Home is resolved via the same `directories` crate used
+/// for the config path.
+fn expand_tilde(path: &str) -> String {
+    let Some(rest) = path.strip_prefix('~') else {
+        return path.to_string();
+    };
+    let Some(home) = directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf()) else {
+        return path.to_string();
+    };
+    // `~` alone, or `~/...` - strip the separator so join doesn't double it.
+    let rest = rest.strip_prefix('/').unwrap_or(rest);
+    home.join(rest).to_string_lossy().into_owned()
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -580,6 +622,44 @@ mod tests {
         // A nonexistent dir is also fine (not an error).
         assert!(config_d_fragments(&dir.join("nope.d")).is_empty());
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn sound_hint_resolves_by_config() {
+        use crate::application::ports::SoundHint;
+        // Disabled -> no hint.
+        let n = Notifications {
+            sound: false,
+            sound_file: Some("/x.oga".into()),
+            ..Notifications::default()
+        };
+        assert_eq!(n.sound_hint(), None);
+        // Enabled, no file -> default theme name.
+        let n = Notifications {
+            sound: true,
+            sound_file: None,
+            ..Notifications::default()
+        };
+        assert_eq!(n.sound_hint(), Some(SoundHint::Name(DEFAULT_SOUND_NAME.into())));
+        // Enabled with an absolute file -> file hint, path unchanged.
+        let n = Notifications {
+            sound: true,
+            sound_file: Some("/sounds/new.oga".into()),
+            ..Notifications::default()
+        };
+        assert_eq!(n.sound_hint(), Some(SoundHint::File("/sounds/new.oga".into())));
+    }
+
+    #[test]
+    fn expand_tilde_expands_home_only() {
+        assert_eq!(expand_tilde("/abs/path"), "/abs/path");
+        assert_eq!(expand_tilde("rel/path"), "rel/path");
+        if let Some(home) = directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf()) {
+            assert_eq!(
+                expand_tilde("~/x.oga"),
+                home.join("x.oga").to_string_lossy().into_owned()
+            );
+        }
     }
 
     #[test]

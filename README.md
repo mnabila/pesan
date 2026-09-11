@@ -230,8 +230,11 @@ notifications:
   enabled: true             # desktop notification on new mail
   folders: [INBOX]          # which mailboxes to watch
   show_sender: true         # include From/subject in the notification body
-  sound: false
+  sound: false              # play a sound with the notification
+  # sound_file: ~/.config/pesan/new-mail.oga  # specific sound file when sound is true; unset => default theme sound
 ```
+
+`sound_file` is passed to the notification daemon via the freedesktop `sound-file` hint (`~` is expanded to your home directory), so playback needs a daemon that supports sound hints (dunst, GNOME, KDE). With `sound: true` and no `sound_file`, a default theme sound is used.
 
 ### `compose`
 
