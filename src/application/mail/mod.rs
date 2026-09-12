@@ -1,3 +1,4 @@
+pub mod browser;
 pub mod fetch;
 pub mod folders;
 pub mod imap_cmd;

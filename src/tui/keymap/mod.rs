@@ -355,6 +355,7 @@ pub fn action_from_name(name: &str) -> Option<Action> {
         "discard_draft" => Action::DiscardDraft,
         "external_editor" => Action::ExternalEditor,
         "open_attachment" => Action::OpenAttachment,
+        "open_in_browser" => Action::OpenInBrowser,
         "settings" => Action::Settings,
         "close_settings" => Action::CloseSettings,
         "save_settings" => Action::SaveSettings,
@@ -391,6 +392,29 @@ mod tests {
             resolve(Ctx::Reader, &[Key::cc('d')], &table),
             Some(Action::ScrollHalfDown)
         );
+    }
+
+    #[test]
+    fn open_in_browser_bound_to_uppercase_o() {
+        let table = build_table(&HashMap::new());
+        assert_eq!(
+            resolve(Ctx::Reader, &[Key::ch('O')], &table),
+            Some(Action::OpenInBrowser)
+        );
+        assert_eq!(
+            resolve(Ctx::List, &[Key::ch('O')], &table),
+            Some(Action::OpenInBrowser)
+        );
+        // Lowercase o keeps its existing meanings.
+        assert_eq!(
+            resolve(Ctx::Reader, &[Key::ch('o')], &table),
+            Some(Action::OpenAttachment)
+        );
+        assert_eq!(
+            resolve(Ctx::List, &[Key::ch('o')], &table),
+            Some(Action::OpenMessage)
+        );
+        assert_eq!(action_from_name("open_in_browser"), Some(Action::OpenInBrowser));
     }
 
     #[test]

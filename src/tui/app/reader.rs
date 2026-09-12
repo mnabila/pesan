@@ -479,6 +479,101 @@ impl App {
         }
     }
 
+    /// Render the current message to `/tmp/pesan/*.html` and open it in the
+    /// browser (`O` in reader + list). Reuses the open message when it matches
+    /// the selection, else resolves the body from cache / live fetch.
+    pub(crate) async fn open_in_browser(&mut self) {
+        use crate::application::mail::browser;
+        let Some(env) = self.selected_env().cloned() else {
+            self.set_toast("No message selected", ToastKind::Warning);
+            return;
+        };
+        // Reader: the open message is authoritative; in the list the selection
+        // may not have a body yet, so fall through to the resolve below.
+        let mut msg = None;
+        if self.view == super::View::Reader {
+            match &self.open_message {
+                Some(m)
+                    if m.envelope.uid == env.uid
+                        && !m.body.is_empty()
+                        && m.body != "Loading message..." =>
+                {
+                    msg = Some(m.clone());
+                }
+                Some(_) => {
+                    self.set_toast("Message still loading...", ToastKind::Info);
+                    return;
+                }
+                None => {
+                    self.set_toast("No message open", ToastKind::Warning);
+                    return;
+                }
+            }
+        } else if let Some(m) = &self.open_message
+            && m.envelope.uid == env.uid
+            && !m.body.is_empty()
+            && m.body != "Loading message..."
+        {
+            msg = Some(m.clone());
+        }
+        let folder = self.selected_folder_name().to_string();
+        let account = self.active_account_name().to_string();
+        let mut msg = match msg {
+            Some(m) => m,
+            None => match self.resolve_browser_message(&folder, &env).await {
+                Some(m) => m,
+                None => {
+                    self.set_toast("Could not load message body", ToastKind::Warning);
+                    return;
+                }
+            },
+        };
+        msg.envelope.flags = env.flags;
+        let to = browser::resolve_to(msg.raw_headers.as_deref(), self.active_account_email());
+        match browser::export_message(&account, &folder, &msg, &to) {
+            Ok(path) => match open::that(&path) {
+                Ok(()) => self.set_toast(
+                    format!("Opened in browser: {}", path.display()),
+                    ToastKind::Success,
+                ),
+                Err(e) => self.set_toast(
+                    format!("Saved {} but could not open browser: {e}", path.display()),
+                    ToastKind::Warning,
+                ),
+            },
+            Err(e) => self.set_toast(format!("Could not export message: {e:#}"), ToastKind::Error),
+        }
+    }
+
+    /// Body for `O` from the list (or a stale reader): cache first, then live
+    /// fetch with the explicit folder, then best-effort source read. Complete
+    /// fetches are written through to the cache like other read paths.
+    async fn resolve_browser_message(
+        &self,
+        folder: &str,
+        env: &Envelope,
+    ) -> Option<Message> {
+        if let Some(id) = self.active_account_id()
+            && let Ok(Some(m)) = self.services.cache.load_message(id, folder, env.uid).await
+            && !m.body.is_empty()
+        {
+            return Some(m);
+        }
+        if let Some(handle) = self.source.imap_handle()
+            && let Ok(m) = handle.fetch_message(folder, env.uid).await
+        {
+            if let Some(id) = self.active_account_id() {
+                let _ = self
+                    .services
+                    .cache
+                    .store_body(id, folder, env.uid, &m.body, m.raw_headers.as_deref())
+                    .await;
+            }
+            return Some(m);
+        }
+        self.source.fetch_message(env.uid).await.ok()
+    }
+
     pub(crate) async fn select_message(&mut self, idx: usize) {
         let prev = self.selected_message;
         let max = self.display_envelopes.len().saturating_sub(1);

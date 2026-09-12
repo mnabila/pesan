@@ -199,6 +199,8 @@ pub enum Action {
     DiscardDraft,
     ExternalEditor,
     OpenAttachment,
+    /// Render the message to /tmp/pesan/*.html and open it in the browser.
+    OpenInBrowser,
 
     // Settings
     Settings,

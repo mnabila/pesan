@@ -196,6 +196,13 @@ static BINDINGS: &[Binding] = &[
         "N",
         "prev match",
     ),
+    b(
+        Ctx::List,
+        &[Key::ch('O')],
+        Action::OpenInBrowser,
+        "O",
+        "open in browser",
+    ),
     b(Ctx::List, &[Key::ch('c')], Action::Compose, "c", "compose"),
     b(Ctx::List, &[Key::ch('r')], Action::Reply, "r", "reply"),
     b(Ctx::List, &[Key::ch('f')], Action::Forward, "f", "forward"),
@@ -251,6 +258,13 @@ static BINDINGS: &[Binding] = &[
         Action::OpenAttachment,
         "o",
         "open attachment",
+    ),
+    b(
+        Ctx::Reader,
+        &[Key::ch('O')],
+        Action::OpenInBrowser,
+        "O",
+        "open in browser",
     ),
     b(
         Ctx::Reader,

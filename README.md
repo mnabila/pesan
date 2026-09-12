@@ -286,6 +286,7 @@ keybinding:
     filter_accounts: /
   list:                 # message list
     open_message: [enter, o]
+    open_in_browser: O
     compose: c
     reply: r
     forward: f
@@ -297,6 +298,7 @@ keybinding:
     reply: r
     forward: f
     open_attachment: o
+    open_in_browser: O
     delete: d
     archive: a
     back: esc
@@ -349,6 +351,7 @@ Press **`?`** anytime for a context-aware help overlay. Defaults:
 |-----|--------|
 | `j` / `k`, `gg` / `G` | navigate |
 | `o` / `Enter` | open message (full-screen reader) |
+| `O` | open message in browser (`/tmp/pesan/*.html`) |
 | `Space` | mark / unmark (tag for bulk actions) |
 | `u` | toggle unread |
 | `s` | flag / star |
@@ -366,6 +369,7 @@ Press **`?`** anytime for a context-aware help overlay. Defaults:
 | `gg` / `G` | top / bottom |
 | `r` / `f` | reply / forward |
 | `o` | open attachment |
+| `O` | open message in browser (`/tmp/pesan/*.html`) |
 | `h` | toggle full message headers |
 | `d` | delete (with confirm) |
 | `a` | archive |

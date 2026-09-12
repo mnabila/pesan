@@ -96,6 +96,7 @@ keybinding:
     page_up: pgup
     page_down: pgdn
     open_message: [enter, o] # open the selected message with Enter or o
+    open_in_browser: O # render to /tmp/pesan/*.html and open in the browser
     toggle_mark: " " # mark / unmark for bulk actions
     toggle_unread: u
     toggle_flag: s
@@ -118,6 +119,7 @@ keybinding:
     reply: r
     forward: f
     open_attachment: o
+    open_in_browser: O # render to /tmp/pesan/*.html and open in the browser
     toggle_headers: h
     delete: d
     archive: a

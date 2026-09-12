@@ -275,6 +275,7 @@ impl App {
                     self.set_toast("Opening attachments is stubbed until M2", ToastKind::Info);
                 }
             }
+            Action::OpenInBrowser => self.open_in_browser().await,
 
             // Settings
             Action::Settings => self.open_settings(),
