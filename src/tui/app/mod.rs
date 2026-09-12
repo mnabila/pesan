@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use anyhow::Context;
 use crossterm::event::{Event as CrosstermEvent, KeyCode, KeyEvent};
 
 use tokio::sync::mpsc::UnboundedSender;
@@ -49,15 +48,7 @@ pub const NARROW_WIDTH: u16 = 90;
 /// the middle of the current page - well before the user reaches the bottom.
 const PREFETCH_ROWS: usize = 50;
 
-/// Whether a message timestamp (unix seconds) falls on the local calendar day,
-/// used to decide which recent messages to pre-warm into the body cache.
-pub(crate) fn is_today(ts: i64) -> bool {
-    use chrono::{Local, TimeZone};
-    Local
-        .timestamp_opt(ts, 0)
-        .single()
-        .is_some_and(|dt| dt.date_naive() == Local::now().date_naive())
-}
+pub(crate) use crate::shared::is_today;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
@@ -201,6 +192,9 @@ pub struct App {
     pub source: Box<dyn MailSource>,
     /// True when `source` is a live IMAP backend (enables write-through cache).
     live: bool,
+    /// Set when the client is offline solely because no `pesan daemon` is
+    /// running; drives a status-bar hint prompting the user to start it.
+    pub daemon_missing: bool,
     pub folders: Vec<Folder>,
     pub folder_collapsed: Vec<bool>,
     pub selected_folder: usize,
@@ -335,6 +329,7 @@ impl App {
             glyphs,
             border_type,
             live: false,
+            daemon_missing: false,
             should_quit: false,
             services,
             pool,
@@ -387,6 +382,9 @@ impl App {
             keymap_table,
             key_window: Vec::new(),
         };
+        // Fill the sidebar with cached counts so numbers show on the first paint,
+        // before any connect. The live STATUS sweep corrects them once connected.
+        app.apply_cached_counts().await;
         app.refresh_display_list(None);
         app
     }

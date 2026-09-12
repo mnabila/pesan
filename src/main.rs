@@ -1,6 +1,7 @@
 mod application;
 mod bootstrap;
 mod cli;
+mod daemon;
 mod domain;
 mod infrastructure;
 mod shared;
@@ -31,7 +32,16 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let _log_guard = bootstrap::logging::init_logging()?;
+    // The daemon logs to the rolling file AND stdout (so systemd/journald and an
+    // on-disk copy both have it); the TUI logs to the file only (stdout is the
+    // interface).
+    use bootstrap::logging::LogMode;
+    let log_mode = if matches!(cli.command, Some(cli::Command::Daemon)) {
+        LogMode::FileAndStdout
+    } else {
+        LogMode::File
+    };
+    let _log_guard = bootstrap::logging::init_logging(log_mode)?;
     let config = bootstrap::config::Config::load()?;
     let runtime = bootstrap::runtime::build_runtime()?;
     let pool = runtime.block_on(database::open(&bootstrap::config::db_path()?))?;
@@ -48,6 +58,12 @@ fn main() -> Result<()> {
         Some(cli::Command::Version) => {
             cli::print_version();
             Ok(())
+        }
+        // Run the headless auto-fetch loop in the foreground until SIGTERM /
+        // Ctrl-C. Reuses the config/DB/runtime already built above.
+        Some(cli::Command::Daemon) => {
+            tracing::info!("daemon: starting");
+            runtime.block_on(daemon::run(config, pool))
         }
     }
 }
@@ -71,7 +87,9 @@ async fn run_app(
     accounts: Vec<database::accounts::Account>,
 ) -> Result<()> {
     let mut events = tui::app::event::Events::spawn();
-    let services = infrastructure::sqlite_services(pool.clone());
+    // Route mail ops through the daemon when one is running (falls back to a
+    // direct IMAP connection otherwise); the daemon itself uses `sqlite_services`.
+    let services = infrastructure::client_services(pool.clone());
     let mut app = tui::app::App::new(config, pool, accounts, services).await;
     app.set_event_sender(events.sender());
     // Offline-first: App::new already shows cached mail; now connect every
@@ -82,6 +100,10 @@ async fn run_app(
     // Only repaint when something actually changed (or a toast/spinner is
     // animating). Redrawing on every 100ms tick wastes CPU and causes flicker.
     let mut dirty = true;
+    // Throttled probe so an offline client comes online once the daemon appears
+    // (and reflects a daemon that went away), without polling every 100ms tick.
+    let sock = bootstrap::config::socket_path().unwrap_or_default();
+    let mut last_daemon_probe = std::time::Instant::now();
     while !app.should_quit {
         if dirty {
             let width = terminal.size().map(|s| s.width).unwrap_or(u16::MAX);
@@ -112,6 +134,22 @@ async fn run_app(
                     || (app.jobs_open && !app.jobs.is_empty())
                 {
                     dirty = true;
+                }
+                // Every ~3s, reconcile with daemon availability.
+                if last_daemon_probe.elapsed() >= std::time::Duration::from_secs(3) {
+                    last_daemon_probe = std::time::Instant::now();
+                    let reachable = infrastructure::mail::ipc::client::daemon_reachable(&sock);
+                    if reachable && !app.is_live() && app.busy().is_none() {
+                        // Daemon (re)appeared while we were offline: come online.
+                        app.services.daemon_backed = true;
+                        app.connect_all_accounts().await;
+                        dirty = true;
+                    } else if !reachable && app.services.daemon_backed && !app.is_live() {
+                        // Daemon went away and we're offline: prompt to start it.
+                        app.services.daemon_backed = false;
+                        app.daemon_missing = true;
+                        dirty = true;
+                    }
                 }
             }
             Some(tui::app::event::Event::NewMail(nm)) => {

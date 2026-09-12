@@ -16,8 +16,8 @@ ui:
   account_label: name # sidebar account label: name | email
   border_type: plain # pane border weight: plain | rounded | thick | double
   statusbar_position: bottom # single statusbar placement: top | bottom
-  poll_interval_secs: 120 # per-account new-mail watcher cadence (fallback poll when IMAP IDLE is unavailable)
-  prefetch_today_count: 30 # bodies of today's newest N messages pre-warmed per folder for instant open (0 disables)
+  # note: polling and body prefetch moved to the daemon block below
+  #       (daemon.poll_interval_secs, daemon.prefetch_today_count)
 
 notifications:
   enabled: true # desktop notification on new mail
@@ -25,6 +25,17 @@ notifications:
   show_sender: true # include From/subject in the notification body
   sound: false # play a sound with the notification (needs a daemon that supports sound hints)
   # sound_file: ~/.config/pesan/new-mail.oga # specific sound file to play when sound is true; unset => default theme sound
+
+# `pesan daemon`: the headless auto-fetch process. Every key falls back to an
+# existing setting when left at its default, so the daemon works with no block.
+daemon:
+  folders: [] # folders to watch/prefetch per account; empty => notifications.folders, then INBOX
+  poll_interval_secs: 120 # daemon watcher cadence when IMAP IDLE is unavailable (floored at 15s) - the single poll knob
+  prefetch_bodies: true # warm message bodies into the cache; false => sync envelopes + notify only
+  prefetch_today_count: 30 # today's newest bodies pre-warmed per folder (on connect and new mail); 0 disables
+  notify: true # raise a desktop notification on new mail (content follows notifications.* above)
+  accounts: [] # restrict to these account names; empty => every authorized account
+  resync_secs: 300 # periodically re-list watched folders to catch server-side changes (flags/removals) and push them to the TUI; 0 disables (floored at 30s)
 
 compose:
   editor:

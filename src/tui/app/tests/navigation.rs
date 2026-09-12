@@ -225,6 +225,7 @@ async fn on_new_mail_prepends_dedups_and_bumps_unread() {
     };
     app.on_new_mail(NewMail {
         account: account.clone(),
+        folder: "INBOX".to_string(),
         envelopes: vec![env.clone()],
     })
     .await;
@@ -242,6 +243,7 @@ async fn on_new_mail_prepends_dedups_and_bumps_unread() {
     // A repeat of the same uid is ignored (dedup).
     app.on_new_mail(NewMail {
         account,
+        folder: "INBOX".to_string(),
         envelopes: vec![env],
     })
     .await;
@@ -265,6 +267,7 @@ async fn on_new_mail_ignores_other_accounts() {
     };
     app.on_new_mail(NewMail {
         account: "some-other-account".to_string(),
+        folder: "INBOX".to_string(),
         envelopes: vec![env],
     })
     .await;

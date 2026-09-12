@@ -91,6 +91,13 @@ async fn ensure_access_token(
     else {
         return Ok(None);
     };
+    // Daemon-backed (TUI client): the daemon owns the live IMAP session and
+    // refreshes its own access token, and `IpcBackend::connect` ignores the
+    // token in `params` entirely - so the client must not perform the OAuth
+    // refresh itself. Hand back nothing; the connect is served over IPC.
+    if svc.daemon_backed {
+        return Ok(None);
+    }
     if !force_refresh
         && let Some((token, exp)) = svc.tokens.load_access_token(&params.keychain_ref).await?
         && (exp as i64) > now_ts() + ACCESS_TOKEN_MARGIN_SECS

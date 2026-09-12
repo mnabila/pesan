@@ -16,4 +16,8 @@ pub struct Services {
     pub backend: Arc<dyn MailBackend>,
     pub notifier: Arc<dyn Notifier>,
     pub watcher: Arc<dyn NewMailWatch>,
+    /// True when `backend`/`watcher` route through a running `pesan daemon`.
+    /// The TUI uses this to skip redundant background warm-up (the daemon already
+    /// keeps the shared cache warm and watches for arrivals).
+    pub daemon_backed: bool,
 }

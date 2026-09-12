@@ -4,7 +4,9 @@
 // without reshaping the model.
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Address {
     pub name: Option<String>,
     pub email: String,
@@ -45,13 +47,13 @@ impl Address {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Flags {
     pub seen: bool,
     pub flagged: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Envelope {
     pub uid: u64,
     pub flags: Flags,
@@ -68,20 +70,20 @@ pub struct Envelope {
 /// One page of a folder's envelopes plus the server-side total, returned by the
 /// windowed (paginated) list. `total` lets callers tell whether older messages
 /// remain: more are available while the number loaded is below `total`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessageWindow {
     pub envelopes: Vec<Envelope>,
     /// Total messages in the mailbox on the server at fetch time (`EXISTS`).
     pub total: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FolderCategory {
     Mailbox,
     Label,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Folder {
     pub name: String,
     pub total: usize,
@@ -106,7 +108,7 @@ impl Folder {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub envelope: Envelope,
     pub body: String,
@@ -118,14 +120,14 @@ pub struct Message {
 
 /// A file staged to be sent with a message. The bytes are read lazily at send
 /// time (see `smtp::build_message`); we keep only the path plus display info.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attachment {
     pub path: PathBuf,
     pub filename: String,
     pub size: u64,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Draft {
     pub to: String,
     pub cc: String,
@@ -154,5 +156,21 @@ impl Draft {
 #[derive(Debug)]
 pub struct NewMail {
     pub account: String,
+    /// The mailbox the arrivals landed in (the watched folder).
+    pub folder: String,
     pub envelopes: Vec<Envelope>,
+}
+
+/// An update emitted by a mailbox watcher. `Arrived` is incremental new mail to
+/// merge into the view; `FolderSynced` is a full newest-window snapshot to
+/// replace the folder with, carrying server-side changes (flag updates, removals)
+/// that the daemon's periodic re-sync detected - not just new arrivals.
+#[derive(Debug)]
+pub enum MailUpdate {
+    Arrived(NewMail),
+    FolderSynced {
+        account: String,
+        folder: String,
+        envelopes: Vec<Envelope>,
+    },
 }

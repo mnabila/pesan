@@ -301,6 +301,29 @@ fn build_fts_query(query: &str) -> String {
         .join(" ")
 }
 
+/// Per-folder cached message counts `(folder, total, unread)` from a single
+/// grouped query. Used for an instant sidebar estimate before the live STATUS
+/// sweep lands. Counts only what is cached (the synced window), so `total` can
+/// undercount a large folder - the sweep replaces it with the server truth.
+pub async fn count_by_folder(db: &Db, account_id: i64) -> Result<Vec<(String, usize, usize)>> {
+    let rows = sqlx::query(
+        "SELECT folder, COUNT(*), SUM(CASE WHEN seen = 0 THEN 1 ELSE 0 END) \
+         FROM messages WHERE account_id = ? GROUP BY folder",
+    )
+    .bind(account_id)
+    .fetch_all(db)
+    .await?;
+    let mut out = Vec::with_capacity(rows.len());
+    for r in &rows {
+        out.push((
+            r.try_get::<String, _>(0)?,
+            r.try_get::<i64, _>(1)? as usize,
+            r.try_get::<i64, _>(2)? as usize,
+        ));
+    }
+    Ok(out)
+}
+
 // Port adapter ----------------------------------------------------------
 
 /// [`MailCache`] backed by the shared SQLite pool; one-line delegations to the
@@ -337,6 +360,10 @@ impl MailCache for SqliteMailCache {
 
     async fn load_envelopes(&self, account_id: i64, folder: &str) -> Result<Vec<Envelope>> {
         load_envelopes(&self.db, account_id, folder).await
+    }
+
+    async fn count_by_folder(&self, account_id: i64) -> Result<Vec<(String, usize, usize)>> {
+        count_by_folder(&self.db, account_id).await
     }
 
     async fn store_body(

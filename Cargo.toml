@@ -65,6 +65,7 @@ tokio = { version = "1.53.1", default-features = false, features = [
   "time",
   "sync",
   "fs",
+  "signal",
 ] }
 tokio-rustls = { version = "0.26", default-features = false, features = [
   "ring",

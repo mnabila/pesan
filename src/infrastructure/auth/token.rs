@@ -12,7 +12,7 @@ const SERVICE: &str = "pesan";
 /// keyring-first, DB-fallback path as the refresh token; no access-token
 /// sibling is involved.
 pub async fn store_password(pool: &Db, keychain_ref: &str, password: &str) -> Result<()> {
-    match keyring_set(keychain_ref, password) {
+    match keyring_set(keychain_ref, password).await {
         Ok(()) => {
             let _ = db::secrets::delete(pool, keychain_ref).await;
             Ok(())
@@ -31,7 +31,7 @@ pub async fn store_password(pool: &Db, keychain_ref: &str, password: &str) -> Re
 /// Load the login password for a password-auth account, if stored. Keychain
 /// first, then the DB fallback.
 pub async fn load_password(pool: &Db, keychain_ref: &str) -> Result<Option<String>> {
-    match keyring_get(keychain_ref) {
+    match keyring_get(keychain_ref).await {
         Ok(Some(secret)) => Ok(Some(secret)),
         Ok(None) => db::secrets::get(pool, keychain_ref).await,
         Err(e) => {
@@ -46,7 +46,7 @@ pub async fn load_password(pool: &Db, keychain_ref: &str) -> Result<Option<Strin
 /// Store (or replace) the refresh token for an account. Tries the OS keychain
 /// first and falls back to the DB secret store if the keychain is unavailable.
 pub async fn store_refresh_token(pool: &Db, keychain_ref: &str, refresh_token: &str) -> Result<()> {
-    match keyring_set(keychain_ref, refresh_token) {
+    match keyring_set(keychain_ref, refresh_token).await {
         Ok(()) => {
             // Keychain is the source of truth now; drop any stale DB entry.
             let _ = db::secrets::delete(pool, keychain_ref).await;
@@ -66,7 +66,7 @@ pub async fn store_refresh_token(pool: &Db, keychain_ref: &str, refresh_token: &
 /// Load the refresh token for an account, if one has been stored. Checks the OS
 /// keychain first, then the DB secret store.
 pub async fn load_refresh_token(pool: &Db, keychain_ref: &str) -> Result<Option<String>> {
-    match keyring_get(keychain_ref) {
+    match keyring_get(keychain_ref).await {
         Ok(Some(secret)) => Ok(Some(secret)),
         // Not in the keychain - it may have been written to the DB fallback.
         Ok(None) => db::secrets::get(pool, keychain_ref).await,
@@ -83,9 +83,9 @@ pub async fn load_refresh_token(pool: &Db, keychain_ref: &str) -> Result<Option<
 /// A missing entry is treated as success. Also clears any cached access token.
 pub async fn delete_refresh_token(pool: &Db, keychain_ref: &str) -> Result<()> {
     // Best-effort keychain delete; also clear the DB fallback.
-    let _ = keyring_delete(keychain_ref);
+    let _ = keyring_delete(keychain_ref).await;
     let access = access_ref(keychain_ref);
-    let _ = keyring_delete(&access);
+    let _ = keyring_delete(&access).await;
     let _ = db::secrets::delete(pool, &access).await;
     db::secrets::delete(pool, keychain_ref).await
 }
@@ -110,7 +110,7 @@ pub async fn store_access_token(
 ) -> Result<()> {
     let key = access_ref(keychain_ref);
     let value = format!("{expires_at}\n{access_token}");
-    match keyring_set(&key, &value) {
+    match keyring_set(&key, &value).await {
         Ok(()) => {
             let _ = db::secrets::delete(pool, &key).await;
             Ok(())
@@ -123,7 +123,7 @@ pub async fn store_access_token(
 /// parseable. Checks the keychain first, then the DB fallback.
 pub async fn load_access_token(pool: &Db, keychain_ref: &str) -> Result<Option<(String, u64)>> {
     let key = access_ref(keychain_ref);
-    let raw = match keyring_get(&key) {
+    let raw = match keyring_get(&key).await {
         Ok(Some(v)) => Some(v),
         Ok(None) => db::secrets::get(pool, &key).await?,
         Err(_) => db::secrets::get(pool, &key).await?,
@@ -138,22 +138,52 @@ pub async fn load_access_token(pool: &Db, keychain_ref: &str) -> Result<Option<(
     Ok(Some((token.to_string(), exp)))
 }
 
-fn keyring_set(keychain_ref: &str, refresh_token: &str) -> Result<(), KeyringError> {
-    Entry::new(SERVICE, keychain_ref)?.set_password(refresh_token)
+// The `keyring` crate talks to the OS Secret Service over a *blocking* DBus
+// call. Run each on `spawn_blocking` so a burst of concurrent token loads (e.g.
+// the client connecting every account at once) never starves the async runtime
+// - blocking a worker thread here previously froze the UI (stalled render ticks)
+// until the keyring calls returned.
+async fn keyring_set(keychain_ref: &str, secret: &str) -> Result<()> {
+    let (key, val) = (keychain_ref.to_string(), secret.to_string());
+    join_keyring(tokio::task::spawn_blocking(move || {
+        Entry::new(SERVICE, &key)?.set_password(&val)
+    }))
+    .await
 }
 
-fn keyring_get(keychain_ref: &str) -> Result<Option<String>, KeyringError> {
-    match Entry::new(SERVICE, keychain_ref)?.get_password() {
-        Ok(secret) => Ok(Some(secret)),
-        Err(KeyringError::NoEntry) => Ok(None),
-        Err(e) => Err(e),
-    }
+async fn keyring_get(keychain_ref: &str) -> Result<Option<String>> {
+    let key = keychain_ref.to_string();
+    join_keyring(tokio::task::spawn_blocking(move || {
+        match Entry::new(SERVICE, &key)?.get_password() {
+            Ok(secret) => Ok(Some(secret)),
+            Err(KeyringError::NoEntry) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }))
+    .await
 }
 
-fn keyring_delete(keychain_ref: &str) -> Result<(), KeyringError> {
-    match Entry::new(SERVICE, keychain_ref)?.delete_credential() {
-        Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
-        Err(e) => Err(e),
+async fn keyring_delete(keychain_ref: &str) -> Result<()> {
+    let key = keychain_ref.to_string();
+    join_keyring(tokio::task::spawn_blocking(move || {
+        match Entry::new(SERVICE, &key)?.delete_credential() {
+            Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
+            Err(e) => Err(e),
+        }
+    }))
+    .await
+}
+
+/// Flatten a `spawn_blocking` join of a keyring op into an `anyhow::Result`,
+/// turning both a keyring error and a task-join failure into `Err` (callers then
+/// fall back to the DB secret store).
+async fn join_keyring<T>(
+    handle: tokio::task::JoinHandle<Result<T, KeyringError>>,
+) -> Result<T> {
+    match handle.await {
+        Ok(Ok(v)) => Ok(v),
+        Ok(Err(e)) => Err(anyhow::Error::new(e)),
+        Err(join) => Err(anyhow::anyhow!("keyring task failed: {join}")),
     }
 }
 

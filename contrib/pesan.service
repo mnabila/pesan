@@ -1,0 +1,39 @@
+# pesan mail auto-fetch daemon (systemd user service).
+#
+# Install:
+#   mkdir -p ~/.config/systemd/user
+#   cp contrib/pesan.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now pesan.service
+#   loginctl enable-linger "$USER"     # optional: keep running after logout
+#
+# Logs (foreground mode logs to stdout, so journald captures them):
+#   journalctl --user -u pesan -f
+#
+# Stop / restart:
+#   systemctl --user stop pesan
+#   systemctl --user restart pesan
+#
+# `pesan daemon` runs in the foreground (Type=simple): no self-fork, no PID
+# file, and `systemctl stop` delivers SIGTERM for a clean shutdown.
+#
+# ExecStart resolves `pesan` from your $PATH via a login shell, so it works
+# wherever it's installed (~/.cargo/bin, ~/.local/bin, /usr/bin, ...). `exec`
+# replaces the shell so systemd still tracks pesan as the main PID. If you
+# prefer, replace it with an absolute path, e.g.
+#   ExecStart=%h/.cargo/bin/pesan daemon
+
+[Unit]
+Description=pesan mail auto-fetch daemon
+Documentation=https://github.com/mnabila/pesan
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/bin/sh -lc 'exec pesan daemon'
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

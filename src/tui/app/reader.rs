@@ -6,23 +6,19 @@ impl App {
     /// notification. Envelopes already present (by uid) are ignored.
     pub async fn on_new_mail(&mut self, batch: NewMail) {
         let is_active = batch.account == self.active_account_name();
+        // The mailbox the arrivals landed in (carried by the watcher/daemon push),
+        // so the right folder's list and counters update - not just INBOX.
+        let arrival_folder = batch.folder.clone();
 
         // Persist new arrivals to the cache for the owning account, so they show
-        // up when the user switches to that account and while offline. The watcher
-        // only follows the configured notifications folder, so mirror that here.
+        // up when the user switches to that account and while offline.
         if let Some(id) = self
             .accounts
             .iter()
             .find(|a| a.name == batch.account)
             .and_then(|a| a.id)
         {
-            let folder = self
-                .config
-                .notifications
-                .folders
-                .first()
-                .cloned()
-                .unwrap_or_else(|| "INBOX".to_string());
+            let folder = arrival_folder.clone();
             if let Ok(cached) = self.services.cache.load_envelopes(id, &folder).await {
                 let fresh: Vec<Envelope> = batch
                     .envelopes
@@ -62,8 +58,8 @@ impl App {
             return;
         }
 
-        let viewing_inbox = self.selected_folder_name().eq_ignore_ascii_case("INBOX");
-        if viewing_inbox {
+        let viewing_folder = self.selected_folder_name().eq_ignore_ascii_case(&arrival_folder);
+        if viewing_folder {
             // Newest first: prepend, keeping the current selection stable by uid.
             let selected_uid = self.selected_env().map(|e| e.uid);
             for env in fresh.iter().rev() {
@@ -78,14 +74,14 @@ impl App {
             }
         }
 
-        // Bump the INBOX counters regardless of the active folder.
-        if let Some(inbox) = self
+        // Bump the arrival folder's counters regardless of the active folder.
+        if let Some(folder) = self
             .folders
             .iter_mut()
-            .find(|f| f.name.eq_ignore_ascii_case("INBOX"))
+            .find(|f| f.name.eq_ignore_ascii_case(&arrival_folder))
         {
-            inbox.total += fresh.len();
-            inbox.unread += fresh.iter().filter(|e| !e.flags.seen).count();
+            folder.total += fresh.len();
+            folder.unread += fresh.iter().filter(|e| !e.flags.seen).count();
         }
 
         self.notify_new_mail(&batch.account, &fresh);
@@ -93,8 +89,8 @@ impl App {
 
         // Newly-arrived mail is today's by definition: pre-warm its bodies on the
         // background queue so the user opens it instantly.
-        let cap = self.config.ui.prefetch_today_count;
-        if self.live && viewing_inbox && cap > 0 {
+        let cap = self.config.daemon.prefetch_cap();
+        if self.live && viewing_folder && cap > 0 {
             let uids: Vec<u64> = fresh.iter().take(cap).map(|e| e.uid).collect();
             self.task_ctx().spawn(Effect::PrefetchBodies {
                 folder: self.selected_folder_name().to_string(),
@@ -221,7 +217,7 @@ impl App {
         if !self.live {
             return;
         }
-        let cap = self.config.ui.prefetch_today_count;
+        let cap = self.config.daemon.prefetch_cap();
         if cap == 0 {
             return;
         }

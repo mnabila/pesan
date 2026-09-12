@@ -33,6 +33,17 @@ pub fn db_path() -> Result<PathBuf> {
     Ok(data_dir()?.join("pesan.db"))
 }
 
+/// Unix socket the `pesan daemon` listens on and the TUI client dials. Prefers
+/// the XDG runtime dir (`$XDG_RUNTIME_DIR/pesan/daemon.sock`, tmpfs, cleared on
+/// logout), falling back to the data dir on platforms without one.
+pub fn socket_path() -> Result<PathBuf> {
+    let dir = project_dirs()?
+        .runtime_dir()
+        .map(Path::to_path_buf)
+        .unwrap_or(data_dir()?);
+    Ok(dir.join("daemon.sock"))
+}
+
 pub fn log_dir() -> Result<PathBuf> {
     Ok(data_dir()?.join("logs"))
 }
@@ -46,6 +57,8 @@ pub struct Config {
     pub ui: Ui,
     #[serde(default)]
     pub notifications: Notifications,
+    #[serde(default)]
+    pub daemon: Daemon,
     #[serde(default)]
     pub compose: Compose,
     /// Per-context key overrides, grouped by keymap section:
@@ -70,6 +83,7 @@ impl Default for Config {
             providers,
             ui: Ui::default(),
             notifications: Notifications::default(),
+            daemon: Daemon::default(),
             compose: Compose::default(),
             keybinding: HashMap::new(),
             themes,
@@ -201,9 +215,9 @@ fn config_d_fragments(dir: &Path) -> Vec<PathBuf> {
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| {
             p.is_file()
-                && p.extension()
-                    .and_then(|e| e.to_str())
-                    .is_some_and(|e| e.eq_ignore_ascii_case("yaml") || e.eq_ignore_ascii_case("yml"))
+                && p.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+                    e.eq_ignore_ascii_case("yaml") || e.eq_ignore_ascii_case("yml")
+                })
         })
         .collect();
     files.sort();
@@ -326,12 +340,6 @@ pub struct Ui {
     /// Where the single statusbar sits: `top` or `bottom`.
     #[serde(default = "default_statusbar_position")]
     pub statusbar_position: String,
-    pub poll_interval_secs: u64,
-    /// How many of today's messages per folder have their bodies pre-warmed into
-    /// the cache (newest-first) so opening a recent one is instant. `0` disables
-    /// prefetch. Kept small so a busy day never floods the single IMAP worker.
-    #[serde(default = "default_prefetch_today_count")]
-    pub prefetch_today_count: usize,
 }
 
 fn default_account_label() -> String {
@@ -359,8 +367,6 @@ impl Default for Ui {
             account_label: default_account_label(),
             border_type: default_border_type(),
             statusbar_position: default_statusbar_position(),
-            poll_interval_secs: 120,
-            prefetch_today_count: default_prefetch_today_count(),
         }
     }
 }
@@ -433,6 +439,109 @@ fn expand_tilde(path: &str) -> String {
 pub struct Compose {
     pub editor: Option<String>,
     pub edit_headers: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Settings for `pesan daemon` (the headless auto-fetch process). Every knob
+/// falls back to an existing setting when left at its default, so the daemon
+/// works with no `daemon:` block at all.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Daemon {
+    /// Folders to watch and prefetch per account. Empty falls back to
+    /// [`Notifications::folders`], then to `INBOX`.
+    #[serde(default)]
+    pub folders: Vec<String>,
+    /// Poll cadence (seconds) for the daemon's watcher when IMAP IDLE is
+    /// unavailable. Floored at 15s. This is the single poll knob - only the
+    /// daemon watches.
+    #[serde(default = "default_poll_secs")]
+    pub poll_interval_secs: u64,
+    /// Warm message bodies into the cache (today's mail on connect, and new
+    /// arrivals). `false` syncs envelopes + notifies only, fetching no bodies.
+    #[serde(default = "default_true")]
+    pub prefetch_bodies: bool,
+    /// Max of today's newest bodies prefetched per folder (on connect and on new
+    /// arrivals). `0` disables; ignored when `prefetch_bodies` is false.
+    #[serde(default = "default_prefetch_today_count")]
+    pub prefetch_today_count: usize,
+    /// Raise a desktop notification on new mail. Uses [`Notifications`] settings
+    /// (`show_sender`, `sound`, `sound_file`) for the notification's content.
+    #[serde(default = "default_true")]
+    pub notify: bool,
+    /// Restrict the daemon to these account names. Empty = every authorized account.
+    #[serde(default)]
+    pub accounts: Vec<String>,
+    /// Periodically re-list each watched folder this often (seconds) to pick up
+    /// server-side changes (flag updates, removals) beyond IDLE's new-mail signal,
+    /// pushing the refreshed list to connected clients. `0` disables the sweep.
+    #[serde(default = "default_resync_secs")]
+    pub resync_secs: u64,
+}
+
+fn default_resync_secs() -> u64 {
+    300
+}
+
+fn default_poll_secs() -> u64 {
+    120
+}
+
+impl Default for Daemon {
+    fn default() -> Self {
+        Self {
+            folders: Vec::new(),
+            poll_interval_secs: default_poll_secs(),
+            prefetch_bodies: true,
+            prefetch_today_count: default_prefetch_today_count(),
+            notify: true,
+            accounts: Vec::new(),
+            resync_secs: default_resync_secs(),
+        }
+    }
+}
+
+impl Daemon {
+    /// Folders to watch: configured `daemon.folders`, else `notifications.folders`,
+    /// else `INBOX`.
+    pub fn resolved_folders(&self, notifications: &Notifications) -> Vec<String> {
+        if !self.folders.is_empty() {
+            self.folders.clone()
+        } else if !notifications.folders.is_empty() {
+            notifications.folders.clone()
+        } else {
+            vec!["INBOX".to_string()]
+        }
+    }
+
+    /// The daemon watcher's poll cadence, floored at 15s.
+    pub fn poll_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.poll_interval_secs.max(15))
+    }
+
+    /// Effective body-prefetch cap: `0` (disabled) when `prefetch_bodies` is
+    /// false, else `prefetch_today_count`.
+    pub fn prefetch_cap(&self) -> usize {
+        if self.prefetch_bodies {
+            self.prefetch_today_count
+        } else {
+            0
+        }
+    }
+
+    /// Whether an account (by name) is in scope: all when the list is empty.
+    pub fn includes(&self, account_name: &str) -> bool {
+        self.accounts.is_empty() || self.accounts.iter().any(|a| a == account_name)
+    }
+
+    /// Periodic folder re-sync cadence, or `None` when disabled (`resync_secs=0`).
+    /// Floored at 30s to keep the sweep gentle on the server.
+    pub fn resync_interval(&self) -> Option<std::time::Duration> {
+        (self.resync_secs > 0).then(|| std::time::Duration::from_secs(self.resync_secs.max(30)))
+    }
 }
 
 /// The documented default config written to `config.yaml` on first run,
@@ -568,7 +677,11 @@ mod tests {
     #[test]
     fn fragment_overrides_base_scalar_and_keeps_siblings() {
         let (dir, base) = scratch("override");
-        fs::write(dir.join(CONFIG_D_DIR).join("10-ui.yaml"), "ui:\n  theme: light\n").unwrap();
+        fs::write(
+            dir.join(CONFIG_D_DIR).join("10-ui.yaml"),
+            "ui:\n  theme: light\n",
+        )
+        .unwrap();
         let frags = config_d_fragments(&dir.join(CONFIG_D_DIR));
         let parsed = Config::from_sources(&base, &frags).unwrap();
         // Overridden leaf wins...
@@ -640,14 +753,20 @@ mod tests {
             sound_file: None,
             ..Notifications::default()
         };
-        assert_eq!(n.sound_hint(), Some(SoundHint::Name(DEFAULT_SOUND_NAME.into())));
+        assert_eq!(
+            n.sound_hint(),
+            Some(SoundHint::Name(DEFAULT_SOUND_NAME.into()))
+        );
         // Enabled with an absolute file -> file hint, path unchanged.
         let n = Notifications {
             sound: true,
             sound_file: Some("/sounds/new.oga".into()),
             ..Notifications::default()
         };
-        assert_eq!(n.sound_hint(), Some(SoundHint::File("/sounds/new.oga".into())));
+        assert_eq!(
+            n.sound_hint(),
+            Some(SoundHint::File("/sounds/new.oga".into()))
+        );
     }
 
     #[test]
@@ -665,7 +784,11 @@ mod tests {
     #[test]
     fn unknown_key_in_fragment_errors() {
         let (dir, base) = scratch("unknown");
-        fs::write(dir.join(CONFIG_D_DIR).join("bad.yaml"), "not_a_real_section: 1\n").unwrap();
+        fs::write(
+            dir.join(CONFIG_D_DIR).join("bad.yaml"),
+            "not_a_real_section: 1\n",
+        )
+        .unwrap();
         let frags = config_d_fragments(&dir.join(CONFIG_D_DIR));
         // deny_unknown_fields still guards the merged value.
         assert!(Config::from_sources(&base, &frags).is_err());

@@ -8,7 +8,7 @@ use async_imap::extensions::idle::IdleResponse;
 use futures::StreamExt;
 use tokio::sync::{Notify, mpsc::UnboundedSender};
 
-use crate::domain::{Envelope, NewMail};
+use crate::domain::{Envelope, MailUpdate, NewMail};
 use crate::infrastructure::auth::oauth::refresh_access_token;
 use crate::infrastructure::mail::imap::client::{
     ConnectParams, ENVELOPE_QUERY, ImapAuth, ImapSession, connect_and_auth, envelope_from_fetch,
@@ -62,7 +62,7 @@ impl crate::application::ports::NewMailWatch for IdleWatchFactory {
         mailbox: String,
         account: String,
         poll_interval: Duration,
-        events: UnboundedSender<NewMail>,
+        events: UnboundedSender<MailUpdate>,
     ) -> Box<dyn crate::application::ports::WatchHandle> {
         Box::new(IdleWatcher::spawn(
             params,
@@ -82,7 +82,7 @@ impl IdleWatcher {
         mailbox: String,
         account: String,
         poll_interval: Duration,
-        events: UnboundedSender<NewMail>,
+        events: UnboundedSender<MailUpdate>,
     ) -> Self {
         let shutdown = Arc::new(Shutdown {
             flag: AtomicBool::new(false),
@@ -114,7 +114,7 @@ fn watcher_main(
     mailbox: String,
     account: String,
     poll_interval: Duration,
-    events: UnboundedSender<NewMail>,
+    events: UnboundedSender<MailUpdate>,
     shutdown: Arc<Shutdown>,
 ) {
     while !shutdown.is_set() {
@@ -201,7 +201,7 @@ async fn run_session(
     mailbox: &str,
     account: &str,
     poll_interval: Duration,
-    events: &UnboundedSender<NewMail>,
+    events: &UnboundedSender<MailUpdate>,
     shutdown: &Shutdown,
 ) -> Result<()> {
     let mut session = connect_and_auth(params, access_token).await?;
@@ -248,10 +248,11 @@ async fn run_session(
                 let (fresh, new_next) = fetch_since(&mut session, next_uid).await?;
                 next_uid = new_next.max(next_uid);
                 if !fresh.is_empty() {
-                    let _ = events.send(NewMail {
+                    let _ = events.send(MailUpdate::Arrived(NewMail {
                         account: account.to_string(),
+                        folder: mailbox.to_string(),
                         envelopes: fresh,
-                    });
+                    }));
                 }
             }
         }

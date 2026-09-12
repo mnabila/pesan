@@ -1,5 +1,5 @@
 use anyhow::{Result, anyhow};
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::sync::oneshot;
 
 use crate::domain::{Draft, Envelope, Folder, Message, MessageWindow};
@@ -56,6 +56,28 @@ pub struct ImapHandle {
 }
 
 impl ImapHandle {
+    /// Build a handle plus the receiving ends of its two command queues. Used by
+    /// the IPC client shim, which drives these queues from a unix socket instead
+    /// of an in-process IMAP worker; the returned handle behaves exactly like a
+    /// live one to the rest of the app.
+    pub(crate) fn channels() -> (Self, UnboundedReceiver<Cmd>, UnboundedReceiver<Cmd>) {
+        let (hi, hi_rx) = unbounded_channel::<Cmd>();
+        let (lo, lo_rx) = unbounded_channel::<Cmd>();
+        (Self { hi, lo }, hi_rx, lo_rx)
+    }
+
+    /// Background: send a message (low priority - the composer already closed).
+    /// The one send surface over a handle; `MailSource::send` on a live source
+    /// takes the same `Cmd::Send` path.
+    pub async fn send(&self, draft: Draft) -> Result<()> {
+        call_on(&self.lo, |tx| Cmd::Send(draft, tx)).await
+    }
+
+    /// Interactive: list all folders/labels.
+    pub async fn list_folders(&self) -> Result<Vec<Folder>> {
+        call_on(&self.hi, Cmd::ListFolders).await
+    }
+
     /// Interactive: list a folder the user just navigated to.
     pub async fn list_messages(&self, folder: &str) -> Result<Vec<Envelope>> {
         let folder = folder.to_string();

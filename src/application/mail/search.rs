@@ -39,6 +39,7 @@ mod tests {
             backend: panic_backend(),
             notifier: std::sync::Arc::new(FakeNotifier),
             watcher: std::sync::Arc::new(crate::application::testing::PanicNewMailWatch),
+            daemon_backed: false,
         }
     }
 

@@ -87,6 +87,18 @@ impl MailCache for FakeMailCache {
             .unwrap_or_default())
     }
 
+    async fn count_by_folder(&self, account_id: i64) -> Result<Vec<(String, usize, usize)>> {
+        Ok(self
+            .envelopes
+            .iter()
+            .filter(|((acc, _), _)| *acc == account_id)
+            .map(|((_, folder), envs)| {
+                let unread = envs.iter().filter(|e| !e.flags.seen).count();
+                (folder.clone(), envs.len(), unread)
+            })
+            .collect())
+    }
+
     async fn store_body(
         &self,
         _account_id: i64,
@@ -245,7 +257,7 @@ impl crate::application::ports::NewMailWatch for PanicNewMailWatch {
         _mailbox: String,
         _account: String,
         _poll_interval: std::time::Duration,
-        _events: tokio::sync::mpsc::UnboundedSender<crate::domain::NewMail>,
+        _events: tokio::sync::mpsc::UnboundedSender<crate::domain::MailUpdate>,
     ) -> Box<dyn crate::application::ports::WatchHandle> {
         panic!("watcher must not be used by this use-case")
     }

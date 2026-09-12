@@ -25,6 +25,12 @@ impl App {
         self.busy.as_deref()
     }
 
+    /// True when connected to a live source (via the daemon). Read by the event
+    /// loop's daemon-availability probe.
+    pub fn is_live(&self) -> bool {
+        self.live
+    }
+
     /// The current spinner frame glyph (ASCII fallback honored).
     pub fn spinner_glyph(&self) -> &'static str {
         if self.config.ui.ascii {
@@ -56,6 +62,8 @@ impl App {
                 self.source = data.source;
                 self.live = true;
                 self.set_folders(data.folders).await;
+                // Show cached counts immediately; the live sweep below corrects them.
+                self.apply_cached_counts().await;
                 self.selected_folder = self
                     .folders
                     .iter()
@@ -89,8 +97,13 @@ impl App {
                 // Folder names are in; fetch their counts in the background so
                 // the (slow, per-folder) STATUS sweep never delays this point.
                 self.spawn_folder_counts();
-                // Warm the cache for this account's other folders too.
-                self.spawn_folder_sync_all();
+                // Warm the cache for this account's other folders too - but only
+                // when connecting directly. A running daemon already keeps every
+                // folder synced in the shared cache, so this all-folders sweep
+                // over IPC would just duplicate its work.
+                if !self.services.daemon_backed {
+                    self.spawn_folder_sync_all();
+                }
                 self.start_account_watcher(self.active_account).await;
                 // Stay wherever the user is when a connect finishes (e.g. the
                 // account manager): just surface the success toast below rather
@@ -237,6 +250,7 @@ impl App {
         self.source = offline_source(&self.services, self.active_account_id()).await;
         let folders = self.source.list_folders().await.unwrap_or_default();
         self.set_folders(folders).await;
+        self.apply_cached_counts().await;
         self.load_folder(self.selected_folder).await;
     }
 
@@ -249,6 +263,30 @@ impl App {
         self.selected_folder = self
             .selected_folder
             .min(self.folders.len().saturating_sub(1));
+    }
+
+    /// Fill the sidebar with counts derived from the cached messages, so numbers
+    /// show instantly (before the live STATUS sweep in `spawn_folder_counts`
+    /// replaces them with the server truth). Only overwrites folders the cache
+    /// knows about; unknown folders keep whatever `carry_counts` preserved.
+    pub(crate) async fn apply_cached_counts(&mut self) {
+        let Some(id) = self.active_account_id() else {
+            return;
+        };
+        let counts = self
+            .services
+            .cache
+            .count_by_folder(id)
+            .await
+            .unwrap_or_default();
+        let by_name: std::collections::HashMap<String, (usize, usize)> =
+            counts.into_iter().map(|(n, t, u)| (n, (t, u))).collect();
+        for f in self.folders.iter_mut() {
+            if let Some(&(total, unread)) = by_name.get(&f.name) {
+                f.total = total;
+                f.unread = unread;
+            }
+        }
     }
 
     /// After a fast connect (folder names only), fetch each folder's
@@ -334,7 +372,16 @@ impl App {
         // busy spinner and only syncs the current folder up front (fast). The
         // rest of its folders are synced in the background from `on_connected`.
         let want_folder = self.selected_folder_name().to_string();
-        self.spawn_connect_inner(idx, true, false, want_folder)
+        self.spawn_connect_inner(idx, true, false, want_folder, false)
+            .await;
+    }
+
+    /// Connect the active account quietly (no busy spinner, no tracked job):
+    /// used on open in daemon mode, where "connecting" is just linking to the
+    /// daemon + loading the current folder - not an IMAP dial worth surfacing.
+    async fn spawn_connect_quiet(&mut self, idx: usize) {
+        let want_folder = self.selected_folder_name().to_string();
+        self.spawn_connect_inner(idx, false, false, want_folder, true)
             .await;
     }
 
@@ -346,23 +393,42 @@ impl App {
     /// connects and fetches the current mailbox automatically) instead of a
     /// manual trip through Settings -> Authorize.
     pub async fn connect_all_accounts(&mut self) {
+        // Strict client: only the daemon talks to IMAP. Consent (browser + paste)
+        // is client-side, so it is still offered when offline; only the actual
+        // online work (connect + watchers) is gated on a running daemon.
+        let daemon = self.services.daemon_backed;
+        self.daemon_missing = !daemon;
+
         let active = self.active_account;
         if let Some(account) = self.accounts.get(active).cloned() {
             if matches!(self.connect_params(active).await, Ok(None)) {
                 self.queue_auto_reauth(&account).await;
             }
-            self.spawn_connect(active).await;
-            // Watch every authorized account for new mail, not just the active
-            // one, so arrivals are pulled and notified regardless of focus.
-            self.start_account_watcher(active).await;
-        }
-        for idx in 0..self.accounts.len() {
-            if idx != active {
-                // Background warm-up: no spinner, sync all folders, INBOX-first.
-                self.spawn_connect_inner(idx, false, true, "INBOX".to_string())
-                    .await;
-                self.start_account_watcher(idx).await;
+            if daemon {
+                // Quiet: linking to the daemon isn't an IMAP dial, so no job.
+                self.spawn_connect_quiet(active).await;
+                // Watch every authorized account for new mail, not just the
+                // active one, so arrivals are notified regardless of focus.
+                self.start_account_watcher(active).await;
             }
+        }
+        if daemon {
+            // Only the active account is connected on open. The daemon already
+            // keeps every other account's cache warm, so they show instantly from
+            // cache and connect on demand when switched to (see `spawn_connect` in
+            // the account-switch path) - no per-account "Warm up" jobs each open.
+            // We still subscribe each for arrivals so new mail notifies regardless
+            // of focus (a cheap push subscription, not an IMAP connection).
+            for idx in 0..self.accounts.len() {
+                if idx != active {
+                    self.start_account_watcher(idx).await;
+                }
+            }
+        } else {
+            self.set_toast(
+                "No pesan daemon running - start it with: pesan daemon".to_string(),
+                ToastKind::Warning,
+            );
         }
     }
 
@@ -375,6 +441,7 @@ impl App {
         set_busy: bool,
         sync_all: bool,
         want_folder: String,
+        quiet: bool,
     ) {
         let params = match self.connect_params(idx).await {
             Ok(Some(p)) => p,
@@ -400,13 +467,14 @@ impl App {
         if set_busy {
             self.busy = Some(format!("Connecting {account}..."));
         }
-        // Track it: a foreground connect vs a background account warm-up.
-        let kind = if set_busy {
-            JobKind::Connect
+        // A quiet connect (on-open daemon link) shows no spinner and no tracked
+        // job: it hands back an inert guard so nothing appears in the tracker.
+        let job = if quiet {
+            crate::tui::app::jobs::JobGuard::new(0, None)
         } else {
-            JobKind::Warmup
+            let kind = if set_busy { JobKind::Connect } else { JobKind::Warmup };
+            self.begin_job(kind, account)
         };
-        let job = self.begin_job(kind, account);
         // The live source (the foreground/active one) reports a wedged session so
         // the app can auto-reconnect. Dependency inversion: the worker only
         // sends the account label; this adapter turns it into an app event, so
@@ -441,62 +509,14 @@ impl App {
         let Some(account) = self.accounts.get(idx) else {
             return Ok(None);
         };
-        let provider = self
-            .config
-            .providers
-            .get(&account.provider)
-            .with_context(|| {
-                format!(
-                    "provider '{}' is not defined in config.yaml",
-                    account.provider
-                )
-            })?;
-        // A provider with an `oauth` block authenticates via XOAUTH2; one without
-        // uses a stored login password (IMAP/SMTP LOGIN).
-        let auth = match &provider.oauth {
-            Some(oauth_cfg) => {
-                let Some(refresh_token) = self
-                    .services
-                    .tokens
-                    .load_refresh_token(&account.keychain_ref)
-                    .await?
-                else {
-                    return Ok(None);
-                };
-                let oauth = ResolvedOAuth::from_config(oauth_cfg)?;
-                crate::application::account::connect_params::ImapAuth::OAuth {
-                    oauth,
-                    refresh_token,
-                    // Filled in by `build_live_data` (cached token or a fresh
-                    // refresh); the IDLE watcher leaves it `None`.
-                    access_token: None,
-                    access_expires_at: None,
-                }
-            }
-            None => {
-                let Some(password) = self
-                    .services
-                    .tokens
-                    .load_password(&account.keychain_ref)
-                    .await?
-                else {
-                    return Ok(None);
-                };
-                crate::application::account::connect_params::ImapAuth::Password { password }
-            }
-        };
-        Ok(Some(
-            crate::application::account::connect_params::ConnectParams {
-                label: account.name.clone(),
-                email: account.email.clone(),
-                host: provider.imap.host.clone(),
-                port: provider.imap.port,
-                smtp_host: provider.smtp.host.clone(),
-                smtp_port: provider.smtp.port,
-                keychain_ref: account.keychain_ref.clone(),
-                auth,
-            },
-        ))
+        // Single source of truth for credential assembly, shared with the
+        // headless daemon (`crate::daemon`).
+        crate::application::account::connect_params::resolve_connect_params(
+            &self.config,
+            account,
+            self.services.tokens.as_ref(),
+        )
+        .await
     }
 
     /// Start (or restart) the background new-mail watcher for the active
@@ -506,7 +526,7 @@ impl App {
     /// watcher opens its own IMAP connection and polls/IDLEs the watched folder,
     /// pushing [`NewMail`] batches into the app event stream. It is started for
     /// every authorized account so new mail is pulled and notified even when the
-    /// account is not in focus. The poll cadence comes from `ui.poll_interval_secs`.
+    /// account is not in focus. The poll cadence comes from `daemon.poll_interval_secs`.
     async fn start_account_watcher(&mut self, idx: usize) {
         let Some(tx) = self.event_tx.clone() else {
             return;
@@ -523,14 +543,28 @@ impl App {
             .first()
             .cloned()
             .unwrap_or_else(|| "INBOX".to_string());
-        let poll = Duration::from_secs(self.config.ui.poll_interval_secs.max(15));
-        // Dependency inversion: the watcher (infrastructure) only knows the
-        // domain type `NewMail`; this adapter relays batches into the app's
-        // event stream, so `mail` never imports `event`.
+        // Poll cadence is a daemon concern; the IPC watcher ignores it anyway.
+        let poll = self.config.daemon.poll_interval();
+        // Dependency inversion: the watcher (infrastructure) speaks the domain
+        // `MailUpdate`; this adapter maps each variant to an app event, so `mail`
+        // never imports `event`. Arrivals merge into the list; a folder re-sync
+        // (from the daemon's periodic sync) replaces the viewed folder.
         let (mail_tx, mut mail_rx) = tokio::sync::mpsc::unbounded_channel();
         tokio::spawn(async move {
-            while let Some(batch) = mail_rx.recv().await {
-                let _ = tx.send(crate::tui::app::event::Event::NewMail(batch));
+            while let Some(update) = mail_rx.recv().await {
+                let event = match update {
+                    crate::domain::MailUpdate::Arrived(nm) => {
+                        crate::tui::app::event::Event::NewMail(nm)
+                    }
+                    crate::domain::MailUpdate::FolderSynced { account, folder, envelopes } => {
+                        crate::tui::app::event::Event::FolderRefreshed(
+                            crate::tui::app::event::FolderRefreshed { account, folder, envelopes },
+                        )
+                    }
+                };
+                if tx.send(event).is_err() {
+                    break;
+                }
             }
         });
         let handle = self

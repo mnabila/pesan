@@ -167,6 +167,14 @@ pub(super) fn status_props(app: &App) -> StatusProps {
         }
     }
 
+    // Persistent hint when the client is offline only because no daemon is up.
+    if app.daemon_missing {
+        context.push(Chunk {
+            text: "  no daemon - run: pesan daemon".into(),
+            tone: Tone::Accent,
+        });
+    }
+
     // A subtle hint that background work is running and the tracker (`` ` ``) has
     // detail; kept in the left group so it never fights the right status slot.
     let running_jobs = app.jobs.running_count();

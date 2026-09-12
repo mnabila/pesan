@@ -16,6 +16,9 @@ pub trait MailCache: Send + Sync {
         envelopes: &[Envelope],
     ) -> Result<()>;
     async fn load_envelopes(&self, account_id: i64, folder: &str) -> Result<Vec<Envelope>>;
+    /// Cached message counts `(folder, total, unread)` per folder, for an instant
+    /// sidebar estimate before the live count sweep. Counts only cached messages.
+    async fn count_by_folder(&self, account_id: i64) -> Result<Vec<(String, usize, usize)>>;
     /// Store a fetched body (and raw headers when available) for a cached message.
     async fn store_body(
         &self,
