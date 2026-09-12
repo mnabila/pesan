@@ -281,6 +281,26 @@ pub fn resolve(ctx: Ctx, window: &[Key], table: &[OwnedBinding]) -> Option<Actio
     best.map(|(_, a)| a)
 }
 
+/// Resolve a key sequence against ONLY `ctx`, without layering the global
+/// bindings. Text-entry overlays (search box, confirm prompt) use this so a
+/// printable key that happens to be a global hotkey - `q`, `z`, `R`, `S`... -
+/// reaches the input as text instead of firing quit/refresh/etc. while typing.
+pub fn resolve_in_ctx(ctx: Ctx, window: &[Key], table: &[OwnedBinding]) -> Option<Action> {
+    let mut best: Option<(usize, Action)> = None;
+    for b in table {
+        if b.ctx != ctx || b.seq.len() > window.len() {
+            continue;
+        }
+        let start = window.len() - b.seq.len();
+        if &window[start..] == b.seq.as_slice()
+            && best.as_ref().is_none_or(|(len, _)| b.seq.len() > *len)
+        {
+            best = Some((b.seq.len(), b.action));
+        }
+    }
+    best.map(|(_, a)| a)
+}
+
 /// True if `window` is a proper prefix of some binding and we should wait for
 /// one more key before dispatching (vim chords such as `g` waiting for `gg`).
 pub fn is_partial(ctx: Ctx, window: &[Key], table: &[OwnedBinding]) -> bool {

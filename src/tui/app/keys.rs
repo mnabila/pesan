@@ -111,7 +111,7 @@ impl App {
     async fn confirm_key(&mut self, key: &Key) {
         // Resolve the confirm keymap so y/Enter (yes) and n/Esc (no) honor user
         // remaps; fall back to the literal y/n for compatibility.
-        if let Some(action) = crate::tui::keymap::resolve(
+        if let Some(action) = crate::tui::keymap::resolve_in_ctx(
             crate::tui::keymap::Ctx::Confirm,
             &[*key],
             &self.keymap_table,
@@ -130,7 +130,7 @@ impl App {
         let Some(search) = &mut self.search else {
             return;
         };
-        if let Some(action) = crate::tui::keymap::resolve(
+        if let Some(action) = crate::tui::keymap::resolve_in_ctx(
             crate::tui::keymap::Ctx::Search,
             &[*key],
             &self.keymap_table,

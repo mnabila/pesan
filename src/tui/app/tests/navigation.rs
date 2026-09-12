@@ -336,3 +336,25 @@ async fn help_toggles() {
     send_key!(app, Key::ch('?'));
     assert!(!app.help_open);
 }
+
+
+#[tokio::test]
+async fn search_box_captures_global_hotkeys_as_text() {
+    let mut app = test_app().await;
+    app.focus = crate::tui::app::Pane::List;
+    send_key!(app, Key::ch('/'));
+    assert!(app.search.is_some(), "search overlay should open");
+    // Every char here is also a global hotkey (q=quit, z=toggle sidebar,
+    // R=refresh, S=settings). Typed into the search box they must become query
+    // text, not fire their actions.
+    for ch in "zqRS".chars() {
+        send_key!(app, Key::ch(ch));
+    }
+    assert_eq!(app.search.as_ref().unwrap().input.text(), "zqRS");
+    assert!(!app.should_quit, "q must not quit while typing a search");
+    assert!(!app.sidebar_collapsed, "z must not toggle the sidebar");
+    assert_eq!(app.view, View::Main, "S must not open settings");
+    // Enter/Esc still work as search keys.
+    send_key!(app, Key::esc());
+    assert!(app.search.is_none(), "Esc closes the search overlay");
+}
