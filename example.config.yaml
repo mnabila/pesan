@@ -43,6 +43,12 @@ compose:
     # e.g. "nvim", or with args: "code --wait"
   edit_headers: false # true = editor buffer also includes To/Cc/Subject headers
 
+# Browser commands for opening URLs. When unset, uses system default handler.
+# Supports full command with arguments (e.g., "firefox --new-window").
+browser:
+  email: ""  # command to open message HTML files (e.g., "firefox --new-window")
+  oauth: ""  # command to open OAuth consent page (e.g., "google-chrome")
+
 # Optional: define your own themes and select one via `ui.theme` above. Every
 # role is required. Values are colors: #rrggbb hex, a named color (e.g. blue),
 # or an indexed 0-255. The built-in names dark/light/mono are reserved.

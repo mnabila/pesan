@@ -80,8 +80,8 @@ pub(super) enum ReaderHeader {
 }
 
 /// Plain-data view model for the reader pane: resolved header fields plus the
-/// final body lines (memoized Markdown, or an inline re-render when the cache
-/// wasn't primed this frame).
+/// final body lines (memoized HTML/Markdown render, or an inline re-render when
+/// the cache wasn't primed this frame).
 #[derive(Debug)]
 pub(super) struct ReaderProps {
     pub header: Option<ReaderHeader>,
@@ -130,15 +130,15 @@ pub(super) fn reader_props(app: &App, width: usize) -> ReaderProps {
         }
     };
 
-    // Memoized Markdown body render (headings, bold, lists, links, tables, ...).
-    // `App::prepare_reader` builds these once per open/resize/theme change - off
-    // the draw path - so a repaint (scroll, spinner tick) never re-parses the
-    // whole body. The event loop primes the cache before every real draw; the
-    // inline fallback covers a standalone draw (a body was set without a
-    // `prepare_reader` pass).
+    // Memoized body render (HTML via html2text, else Markdown - headings, bold,
+    // lists, links, tables, ...). `App::prepare_reader` builds these once per
+    // open/resize/theme change - off the draw path - so a repaint (scroll,
+    // spinner tick) never re-parses the whole body. The event loop primes the
+    // cache before every real draw; the inline fallback covers a standalone
+    // draw (a body was set without a `prepare_reader` pass).
     let memoized = app.reader_lines();
     let body = if memoized.is_empty() && !msg.body.is_empty() {
-        crate::tui::markdown::render(&msg.body, width, &app.theme, app.config.ui.ascii)
+        crate::tui::html::render_message(msg, width, &app.theme, app.config.ui.ascii)
     } else {
         memoized.to_vec()
     };

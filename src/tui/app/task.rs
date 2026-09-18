@@ -100,6 +100,7 @@ impl TaskCtx {
                                         &folder,
                                         uid,
                                         &msg.body,
+                                        msg.raw_html.as_deref(),
                                         msg.raw_headers.as_deref(),
                                     )
                                     .await;
@@ -114,6 +115,7 @@ impl TaskCtx {
                             body: format!(
                                 "Could not load this message: {e}\n\nPress Esc, then open it again to retry."
                             ),
+                            raw_html: None,
                             raw_headers: None,
                         },
                     };
@@ -153,6 +155,7 @@ impl TaskCtx {
                                     &folder,
                                     uid,
                                     &msg.body,
+                                    msg.raw_html.as_deref(),
                                     msg.raw_headers.as_deref(),
                                 )
                                 .await;

@@ -470,7 +470,14 @@ impl App {
                     let _ = self
                         .services
                         .cache
-                        .store_body(id, &folder, uid, &msg.body, msg.raw_headers.as_deref())
+                        .store_body(
+                            id,
+                            &folder,
+                            uid,
+                            &msg.body,
+                            msg.raw_html.as_deref(),
+                            msg.raw_headers.as_deref(),
+                        )
                         .await;
                 }
                 self.set_open_message(Some(msg));
@@ -530,29 +537,23 @@ impl App {
         };
         msg.envelope.flags = env.flags;
         let to = browser::resolve_to(msg.raw_headers.as_deref(), self.active_account_email());
-        match browser::export_message(&account, &folder, &msg, &to) {
-            Ok(path) => match open::that(&path) {
-                Ok(()) => self.set_toast(
-                    format!("Opened in browser: {}", path.display()),
-                    ToastKind::Success,
-                ),
-                Err(e) => self.set_toast(
-                    format!("Saved {} but could not open browser: {e}", path.display()),
-                    ToastKind::Warning,
-                ),
-            },
-            Err(e) => self.set_toast(format!("Could not export message: {e:#}"), ToastKind::Error),
+        let browser_cmd = self.config.browser.email.as_deref();
+        match browser::export_and_open_message(&account, &folder, &msg, &to, browser_cmd) {
+            Ok(path) => self.set_toast(
+                format!("Opened in browser: {}", path.display()),
+                ToastKind::Success,
+            ),
+            Err(e) => self.set_toast(
+                format!("Could not export/open message: {e:#}"),
+                ToastKind::Error,
+            ),
         }
     }
 
     /// Body for `O` from the list (or a stale reader): cache first, then live
     /// fetch with the explicit folder, then best-effort source read. Complete
     /// fetches are written through to the cache like other read paths.
-    async fn resolve_browser_message(
-        &self,
-        folder: &str,
-        env: &Envelope,
-    ) -> Option<Message> {
+    async fn resolve_browser_message(&self, folder: &str, env: &Envelope) -> Option<Message> {
         if let Some(id) = self.active_account_id()
             && let Ok(Some(m)) = self.services.cache.load_message(id, folder, env.uid).await
             && !m.body.is_empty()
@@ -566,7 +567,14 @@ impl App {
                 let _ = self
                     .services
                     .cache
-                    .store_body(id, folder, env.uid, &m.body, m.raw_headers.as_deref())
+                    .store_body(
+                        id,
+                        folder,
+                        env.uid,
+                        &m.body,
+                        m.raw_html.as_deref(),
+                        m.raw_headers.as_deref(),
+                    )
                     .await;
             }
             return Some(m);

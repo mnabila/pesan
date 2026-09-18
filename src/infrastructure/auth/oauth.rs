@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -11,6 +12,8 @@ use oauth2::{
 };
 use serde::Deserialize;
 use url::Url;
+
+use crate::application::mail::browser;
 
 pub use crate::application::oauth::{AuthCodeFlow, ResolvedOAuth, TokenSet};
 
@@ -70,9 +73,9 @@ fn http_client() -> Result<reqwest::blocking::Client> {
 /// Begin the authorization-code + PKCE flow: build the consent URL and open it
 /// in a browser. Does **no** network and binds **no** listener; the caller then
 /// prompts the user to paste the redirect URL and passes it to
-/// [`exchange_pasted_redirect`]. `open::that` spawns a browser process, so this
-/// must run off any async runtime (see the blocking-work rule).
-pub fn begin_auth_code_flow(oauth: &ResolvedOAuth) -> Result<AuthCodeFlow> {
+/// [`exchange_pasted_redirect`]. Browser is opened via configured command or
+/// system default. Must run off any async runtime (see the blocking-work rule).
+pub fn begin_auth_code_flow(oauth: &ResolvedOAuth, browser_cmd: Option<&str>) -> Result<AuthCodeFlow> {
     let redirect = REDIRECT_URI;
     let client = BasicClient::new(ClientId::new(oauth.client_id.clone()))
         .set_client_secret(ClientSecret::new(oauth.client_secret.clone()))
@@ -110,7 +113,7 @@ pub fn begin_auth_code_flow(oauth: &ResolvedOAuth) -> Result<AuthCodeFlow> {
     // Best effort: pop a browser. If that fails, the URL is still logged so the
     // user can open it manually (the TUI also shows it).
     tracing::info!("opening OAuth consent URL: {authorize_url}");
-    if let Err(e) = open::that(&authorize_url) {
+    if let Err(e) = browser::open_in_browser(Path::new(&authorize_url), browser_cmd) {
         tracing::warn!("could not open browser automatically: {e}");
     }
 

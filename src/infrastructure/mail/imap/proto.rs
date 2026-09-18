@@ -157,10 +157,11 @@ pub(crate) async fn fetch_message(session: &mut ImapSession, uid: u64) -> Result
         .as_ref()
         .map(|m| m.attachment_count() > 0)
         .unwrap_or(false);
-    let body = parsed
-        .as_ref()
-        .map(extract_body)
-        .unwrap_or_else(|| "(unable to parse message body)".to_string());
+    let body = parsed.as_ref().map(extract_body);
+    let (text, raw_html) = match body {
+        Some(b) => (b.text, b.raw_html),
+        None => ("(unable to parse message body)".to_string(), None),
+    };
     let raw_headers = raw_header_block(raw);
 
     Ok(Message {
@@ -174,7 +175,8 @@ pub(crate) async fn fetch_message(session: &mut ImapSession, uid: u64) -> Result
             snippet: None,
             message_id,
         },
-        body,
+        body: text,
+        raw_html,
         raw_headers,
     })
 }

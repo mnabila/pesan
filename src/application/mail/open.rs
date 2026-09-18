@@ -29,6 +29,7 @@ pub async fn open_message(
         let immediate = cached.unwrap_or_else(|| Message {
             envelope: env.clone(),
             body: "Loading message...".to_string(),
+            raw_html: None,
             raw_headers: None,
         });
         let effect = if shown && had_headers {
@@ -125,7 +126,7 @@ mod tests {
             .insert((account, "INBOX".to_string()), vec![env(1)]);
         c.bodies.insert(
             (account, "INBOX".to_string(), 1),
-            ("body".to_string(), Some("From: ada".to_string())),
+            ("body".to_string(), None, Some("From: ada".to_string())),
         );
         c
     }
@@ -145,7 +146,7 @@ mod tests {
         // Same envelope cached but with no raw headers -> incomplete copy.
         c.bodies.insert(
             (account, "INBOX".to_string(), 1),
-            ("body".to_string(), None),
+            ("body".to_string(), None, None),
         );
         let s = svc(c);
         let out = open_message(&s, Some(account), "INBOX", &env(1), true).await;

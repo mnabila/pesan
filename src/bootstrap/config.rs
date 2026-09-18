@@ -61,6 +61,8 @@ pub struct Config {
     pub daemon: Daemon,
     #[serde(default)]
     pub compose: Compose,
+    #[serde(default)]
+    pub browser: BrowserConfig,
     /// Per-context key overrides, grouped by keymap section:
     /// section (`global`, `list`, ...) -> action name -> one or more sequences.
     #[serde(default)]
@@ -85,6 +87,7 @@ impl Default for Config {
             notifications: Notifications::default(),
             daemon: Daemon::default(),
             compose: Compose::default(),
+            browser: BrowserConfig::default(),
             keybinding: HashMap::new(),
             themes,
         }
@@ -439,6 +442,20 @@ fn expand_tilde(path: &str) -> String {
 pub struct Compose {
     pub editor: Option<String>,
     pub edit_headers: bool,
+}
+
+/// Browser configuration for opening URLs and message HTML files.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserConfig {
+    /// Command to open message HTML files (e.g., "firefox --new-window").
+    /// When unset, uses system default handler.
+    #[serde(default)]
+    pub email: Option<String>,
+    /// Command to open OAuth consent URLs (e.g., "google-chrome").
+    /// When unset, uses system default handler.
+    #[serde(default)]
+    pub oauth: Option<String>,
 }
 
 fn default_true() -> bool {

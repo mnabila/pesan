@@ -97,6 +97,7 @@ async fn seed_fixture_cache(conn: &database::Db, account_id: i64) {
         "INBOX",
         1,
         "Let us discuss the roadmap sequencing.",
+        None,
         Some("Subject: Q3 roadmap review\r\nFrom: jane@acme.io\r\nDate: Mon, 1 Jan 2024 09:00:00 +0000"),
     )
     .await

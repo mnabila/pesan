@@ -111,7 +111,15 @@ impl Folder {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub envelope: Envelope,
+    /// Plain searchable text: the text/plain part verbatim, or the HTML part
+    /// converted to text. Feeds search, reply/forward quoting, and the reader
+    /// fallback when no HTML source is stored.
     pub body: String,
+    /// Original HTML source when `body` came from an HTML part (capped), so
+    /// the reader can render width-aware styled lines. `None` for plain-text
+    /// mail, errors, and placeholders.
+    #[serde(default)]
+    pub raw_html: Option<String>,
     /// Raw RFC822 header block (everything before the first blank line), when
     /// available. Populated by the live IMAP fetch; `None` for cached messages
     /// (only the body is cached). Shown by the reader's "full headers" toggle.

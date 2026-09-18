@@ -221,13 +221,14 @@ async fn run_app(
         }
         if let Some(req) = oauth {
             // Step 1 of the manual (copy/paste) OAuth flow: build the consent URL
-            // and open the browser. No HTTP listener is bound. `open::that`
-            // spawns a browser process, so run it off the Tokio runtime on a
-            // scoped thread (the blocking-work rule); it returns quickly. The
-            // user then pastes the redirect URL into the TUI (handled below).
+            // and open the browser. No HTTP listener is bound. Browser is opened
+            // via configured command or system default. Run off the Tokio runtime
+            // on a scoped thread (the blocking-work rule); it returns quickly.
+            // The user then pastes the redirect URL into the TUI (handled below).
             let oauth_cfg = req.oauth.clone();
+            let browser_cmd = app.config.browser.oauth.as_deref();
             let flow = std::thread::scope(|s| {
-                s.spawn(|| auth::oauth::begin_auth_code_flow(&oauth_cfg))
+                s.spawn(|| auth::oauth::begin_auth_code_flow(&oauth_cfg, browser_cmd))
                     .join()
                     .unwrap_or_else(|_| Err(anyhow::anyhow!("OAuth thread panicked")))
             });

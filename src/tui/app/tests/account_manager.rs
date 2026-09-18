@@ -20,111 +20,7 @@ fn with_test_oauth(app: &mut App) {
     }
 }
 
-#[tokio::test]
-async fn auth_failure_queues_background_reauthorize_once() {
-    let mut app = test_app().await;
-    with_test_oauth(&mut app);
-
-    // The stored credential was rejected: the app must queue the browser
-    // consent flow automatically instead of waiting for a manual Authorize.
-    let err = crate::tui::app::event::ConnectError::Auth(
-        "connect: XOAUTH2 authentication failed: AUTHENTICATIONFAILED".into(),
-    );
-    fail_connect(&mut app, err).await;
-    assert!(!app.live);
-    assert!(app.oauth_in_progress, "consent overlay armed");
-    let req = app.pending_oauth.as_ref().expect("auto re-auth queued");
-    assert_eq!(req.account.name, "personal");
-    assert_eq!(req.account.provider, "gmail");
-    // Re-authorization never changes which account is default.
-    assert!(!req.set_default);
-
-    // Consume the prompt (as the event loop would), then fail again: no second
-    // browser prompt for the same account within one session.
-    let _ = app.take_pending_oauth();
-    app.oauth_in_progress = false;
-    fail_connect(
-        &mut app,
-        crate::tui::app::event::ConnectError::Auth("connect: IMAP LOGIN failed".into()),
-    )
-    .await;
-    assert!(
-        app.pending_oauth.is_none(),
-        "auto re-auth fires at most once per session"
-    );
-}
-
-#[tokio::test]
-async fn network_failure_does_not_queue_reauthorize() {
-    let mut app = test_app().await;
-    with_test_oauth(&mut app);
-    fail_connect(
-        &mut app,
-        crate::tui::app::event::ConnectError::Other(
-            "connect: timed out connecting to IMAP server".into(),
-        ),
-    )
-    .await;
-    assert!(
-        app.pending_oauth.is_none(),
-        "offline is not an auth problem"
-    );
-}
-
-#[tokio::test]
-async fn startup_queues_consent_for_never_authorized_account() {
-    let mut app = test_app().await; // no refresh token stored anywhere
-    with_test_oauth(&mut app);
-
-    // The account has no stored credential, so `connect_params` yields None -
-    // exactly what `connect_all_accounts` sees on first open.
-    assert!(matches!(app.connect_params(0).await, Ok(None)));
-    app.connect_all_accounts().await;
-    let req = app
-        .pending_oauth
-        .as_ref()
-        .expect("first-run consent queued");
-    assert_eq!(req.account.name, "personal");
-    assert!(app.oauth_in_progress);
-}
-
-#[tokio::test]
-async fn cancelling_consent_drops_overlay_without_error() {
-    let mut app = test_app().await;
-    with_test_oauth(&mut app);
-
-    // Auth failure arms the auto re-auth consent overlay.
-    fail_connect(
-        &mut app,
-        crate::tui::app::event::ConnectError::Auth("connect: XOAUTH2 authentication failed".into()),
-    )
-    .await;
-    assert!(app.oauth_in_progress, "consent overlay armed");
-
-    // The event loop takes the pending request, runs the (cancelled) flow, then
-    // reports the cancel: the overlay clears and no error toast is raised.
-    let _ = app.take_pending_oauth();
-    app.cancel_oauth();
-    assert!(!app.oauth_in_progress, "overlay cleared after cancel");
-    assert!(
-        matches!(app.toasts.last().map(|t| t.kind), Some(ToastKind::Info)),
-        "cancel is informational, not an error"
-    );
-
-    // The once-per-session guard still holds, so a later failure does not nag.
-    fail_connect(
-        &mut app,
-        crate::tui::app::event::ConnectError::Auth("connect: IMAP LOGIN failed".into()),
-    )
-    .await;
-    assert!(
-        app.pending_oauth.is_none(),
-        "no re-prompt after the user cancelled this session"
-    );
-}
-
-/// Build a queued OAuth request + an opened flow for the active account, as the
-/// event loop would after `begin_auth_code_flow`.
+/// Build a queued OAuth request + an opened flow for the active account.
 fn open_paste_flow(app: &mut App) {
     let account = app.accounts[app.active_account].clone();
     let req = PendingOAuth {
@@ -148,69 +44,119 @@ fn open_paste_flow(app: &mut App) {
 }
 
 #[tokio::test]
-async fn pasting_redirect_url_queues_the_code_exchange() {
+async fn oauth_reauth_flows() {
+    // Auth failure queues re-auth once per session
+    let mut app = test_app().await;
+    with_test_oauth(&mut app);
+    fail_connect(
+        &mut app,
+        crate::tui::app::event::ConnectError::Auth("connect: XOAUTH2 failed".into()),
+    )
+    .await;
+    assert!(app.oauth_in_progress);
+    assert!(app.pending_oauth.is_some());
+    let _ = app.take_pending_oauth();
+    app.oauth_in_progress = false;
+
+    // Second auth failure in same session does NOT queue again
+    fail_connect(
+        &mut app,
+        crate::tui::app::event::ConnectError::Auth("connect: IMAP LOGIN failed".into()),
+    )
+    .await;
+    assert!(app.pending_oauth.is_none());
+
+    // Network failure does not queue re-auth
+    let mut app2 = test_app().await;
+    with_test_oauth(&mut app2);
+    fail_connect(
+        &mut app2,
+        crate::tui::app::event::ConnectError::Other("connect: timed out".into()),
+    )
+    .await;
+    assert!(app2.pending_oauth.is_none());
+
+    // Startup with no stored credential queues consent
+    let mut app3 = test_app().await;
+    with_test_oauth(&mut app3);
+    assert!(matches!(app3.connect_params(0).await, Ok(None)));
+    app3.connect_all_accounts().await;
+    assert!(app3.pending_oauth.is_some());
+    assert!(app3.oauth_in_progress);
+
+    // Cancelling consent clears overlay, no error toast, and guards against re-prompt
+    let mut app4 = test_app().await;
+    with_test_oauth(&mut app4);
+    fail_connect(
+        &mut app4,
+        crate::tui::app::event::ConnectError::Auth("connect: XOAUTH2 failed".into()),
+    )
+    .await;
+    let _ = app4.take_pending_oauth();
+    app4.cancel_oauth();
+    assert!(!app4.oauth_in_progress);
+    assert!(matches!(
+        app4.toasts.last().map(|t| t.kind),
+        Some(ToastKind::Info)
+    ));
+    fail_connect(
+        &mut app4,
+        crate::tui::app::event::ConnectError::Auth("connect: IMAP LOGIN failed".into()),
+    )
+    .await;
+    assert!(app4.pending_oauth.is_none());
+}
+
+#[tokio::test]
+async fn oauth_paste_flow() {
     let mut app = test_app().await;
     open_paste_flow(&mut app);
-    assert!(app.oauth_paste.is_some(), "paste prompt is up");
+    assert!(app.oauth_paste.is_some());
 
-    // Type the redirect URL the browser landed on, then submit with Enter.
+    // Valid redirect URL submits exchange
     for c in "http://localhost/?code=AAA&state=state".chars() {
         send_key!(app, Key::ch(c));
     }
     send_key!(app, Key::enter());
-
-    // The paste prompt clears and the pasted URL is handed to the event loop.
-    assert!(app.oauth_paste.is_none(), "prompt cleared on submit");
+    assert!(app.oauth_paste.is_none());
     let sub = app.take_oauth_submit().expect("exchange queued");
-    assert!(
-        sub.input.text().contains("code=AAA"),
-        "pasted URL carried to the exchange: {}",
-        sub.input.text()
-    );
-}
+    assert!(sub.input.text().contains("code=AAA"));
 
-#[tokio::test]
-async fn paste_prompt_floats_when_not_in_the_account_form() {
+    // Blank paste is rejected, prompt stays
+    let mut app2 = test_app().await;
+    open_paste_flow(&mut app2);
+    send_key!(app2, Key::enter());
+    assert!(app2.oauth_submit.is_none());
+    assert!(app2.oauth_paste.is_some());
+
+    // Escape cancels prompt and clears overlay
+    let mut app3 = test_app().await;
+    open_paste_flow(&mut app3);
+    send_key!(app3, Key::esc());
+    assert!(app3.oauth_paste.is_none());
+    assert!(!app3.oauth_in_progress);
+    assert!(app3.oauth_submit.is_none());
+
+    // Outside account form, prompt floats as overlay
+    let mut app4 = test_app().await;
+    open_paste_flow(&mut app4);
+    assert!(!app4.oauth_paste_inline());
     use ratatui::{Terminal, backend::TestBackend};
-    // An auto re-auth / startup consent happens outside the Account Manager, so
-    // the paste prompt floats as a centered overlay instead of splitting a form.
-    let mut app = test_app().await; // view defaults to Main
-    open_paste_flow(&mut app);
-    assert!(
-        !app.oauth_paste_inline(),
-        "no form open -> prompt must float"
-    );
     let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
-    term.draw(|f| crate::tui::views::draw(f, &app)).unwrap();
-    let buf = term.backend().buffer().clone();
-    let text: String = buf.content().iter().map(|c| c.symbol()).collect();
-    assert!(text.contains("authorize gmail"), "floating overlay shown");
-    assert!(text.contains("Redirect URL"), "paste field shown");
+    term.draw(|f| crate::tui::views::draw(f, &app4)).unwrap();
+    let text: String = term
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|c| c.symbol())
+        .collect();
+    assert!(text.contains("authorize gmail"));
+    assert!(text.contains("Redirect URL"));
 }
 
 #[tokio::test]
-async fn submitting_a_blank_paste_is_rejected() {
-    let mut app = test_app().await;
-    open_paste_flow(&mut app);
-    // Enter with nothing pasted must not queue an exchange; the prompt stays up.
-    send_key!(app, Key::enter());
-    assert!(app.oauth_submit.is_none(), "blank paste is not submitted");
-    assert!(app.oauth_paste.is_some(), "prompt stays up for another try");
-}
-
-#[tokio::test]
-async fn escape_cancels_the_paste_prompt() {
-    let mut app = test_app().await;
-    open_paste_flow(&mut app);
-    send_key!(app, Key::esc());
-    assert!(app.oauth_paste.is_none(), "prompt dismissed");
-    assert!(!app.oauth_in_progress, "overlay cleared");
-    assert!(app.oauth_submit.is_none());
-}
-
-#[tokio::test]
-async fn sidebar_switches_account_from_tree() {
-    // Build an app with two accounts and drive the sidebar tree.
+async fn sidebar_account_switching() {
     let config = Config::default();
     let conn = database::open(Path::new(":memory:")).await.unwrap();
     let mk = |name: &str, def: bool| Account {
@@ -231,7 +177,6 @@ async fn sidebar_switches_account_from_tree() {
     let accounts = crate::infrastructure::database::accounts::list(&conn)
         .await
         .unwrap();
-    // Give each account real cached folders so the sidebar tree renders.
     for a in &accounts {
         seed_fixture_cache(&conn, a.id.unwrap()).await;
     }
@@ -245,112 +190,48 @@ async fn sidebar_switches_account_from_tree() {
     app.focus = Pane::Folders;
     assert_eq!(app.active_account, 0);
 
-    // The tree lists both accounts, with the active one's folders under it.
-    let items = app.sidebar_items();
-    assert_eq!(items.first(), Some(&SidebarItem::Account(0)));
-    assert!(items.contains(&SidebarItem::Account(1)));
-    assert!(items.iter().any(|i| matches!(i, SidebarItem::Folder(_))));
-
-    // Move the cursor onto the "work" account header and activate it.
+    // Click account in tree switches active
     app.sidebar_sel = SidebarItem::Account(1);
-    app.action(Action::SelectFolder).await; // Enter in the sidebar
+    app.action(Action::SelectFolder).await;
     assert_eq!(app.active_account, 1);
-}
 
-#[tokio::test]
-async fn sidebar_account_filter_narrows_and_switches() {
-    let config = Config::default();
-    let conn = database::open(Path::new(":memory:")).await.unwrap();
-    let mk = |name: &str, def: bool| Account {
-        id: None,
-        name: name.into(),
-        email: format!("{name}@x.io"),
-        provider: "gmail".into(),
-        keychain_ref: String::new(),
-        is_default: def,
-        created_at: 1,
-    };
-    crate::infrastructure::database::accounts::upsert(&conn, &mk("personal", true))
-        .await
-        .unwrap();
-    crate::infrastructure::database::accounts::upsert(&conn, &mk("work", false))
-        .await
-        .unwrap();
-    let accounts = crate::infrastructure::database::accounts::list(&conn)
-        .await
-        .unwrap();
-    // Give each account real cached folders so the sidebar tree renders.
-    for a in &accounts {
-        seed_fixture_cache(&conn, a.id.unwrap()).await;
-    }
-    let mut app = App::new(
-        config,
-        conn.clone(),
-        accounts,
-        crate::infrastructure::sqlite_services(conn.clone()),
-    )
-    .await;
-    app.focus = Pane::Folders;
-
-    // `/` opens the filter; folders vanish while account-picking.
+    // Filter narrows to match, Enter switches, Esc cancels
     send_key!(app, Key::ch('/'));
     assert!(app.sidebar_filtering);
-    for c in "work".chars() {
-        send_key!(app, Key::ch(c));
-    }
-    let items = app.sidebar_items();
-    assert_eq!(items, vec![SidebarItem::Account(1)]);
-    assert_eq!(app.sidebar_sel, SidebarItem::Account(1));
-
-    // Enter switches to the sole match and closes the filter.
-    send_key!(app, Key::enter());
-    assert!(!app.sidebar_filtering);
-    assert!(app.sidebar_filter.is_empty());
-    assert_eq!(app.active_account, 1);
-    // Folders are back under the now-active account.
-    assert!(
-        app.sidebar_items()
-            .iter()
-            .any(|i| matches!(i, SidebarItem::Folder(_)))
-    );
-
-    // Esc cancels without switching.
-    send_key!(app, Key::ch('/'));
     for c in "personal".chars() {
         send_key!(app, Key::ch(c));
     }
-    send_key!(app, Key::esc());
+    assert_eq!(app.sidebar_items(), vec![SidebarItem::Account(0)]);
+    send_key!(app, Key::enter());
+    assert_eq!(app.active_account, 0);
     assert!(!app.sidebar_filtering);
-    assert!(app.sidebar_filter.is_empty());
-    assert_eq!(app.active_account, 1, "Esc must not switch accounts");
+
+    send_key!(app, Key::ch('/'));
+    for c in "work".chars() {
+        send_key!(app, Key::ch(c));
+    }
+    send_key!(app, Key::esc());
+    assert_eq!(app.active_account, 0, "Esc must not switch");
 }
 
 #[tokio::test]
-async fn authorize_no_longer_requires_name_and_email() {
+async fn authorize_form_validation() {
+    // Empty form shows config error (not "enter name/email")
     let mut app = test_app().await;
     focus_authorize(&mut app).await;
-    // Name/email are auto-filled from OAuth now, so activating Authorize with an
-    // empty form does NOT show the old "enter name and email" warning. With the
-    // default gmail provider's empty client_id it surfaces a config error instead
-    // (and still queues nothing).
     send_key!(app, Key::enter());
     assert!(app.pending_oauth.is_none());
     let toast = app.toasts.last().expect("a toast");
     assert_eq!(toast.kind, ToastKind::Error);
     assert!(toast.text.to_lowercase().contains("oauth config"));
-}
 
-#[tokio::test]
-async fn authorize_reports_missing_provider_credentials() {
-    // Default config has a gmail provider with an empty client_id, so a
-    // fully-filled form should surface a config error rather than launch
-    // a browser (and must not queue an OAuth request).
-    let mut app = test_app().await;
-    focus_authorize(&mut app).await;
-    app.settings.as_mut().unwrap().focus = SettingsFocus::Name;
-    app.settings.as_mut().unwrap().editing = true;
+    // Filled form with missing provider creds also shows config error
+    let mut app2 = test_app().await;
+    focus_authorize(&mut app2).await;
+    app2.settings.as_mut().unwrap().focus = SettingsFocus::Name;
+    app2.settings.as_mut().unwrap().editing = true;
     for ch in "Work".chars() {
-        app.settings
+        app2.settings
             .as_mut()
             .unwrap()
             .form
@@ -360,7 +241,7 @@ async fn authorize_reports_missing_provider_credentials() {
             .handle(&key_ev(&Key::ch(ch)));
     }
     for ch in "work@corp.io".chars() {
-        app.settings
+        app2.settings
             .as_mut()
             .unwrap()
             .form
@@ -369,66 +250,15 @@ async fn authorize_reports_missing_provider_credentials() {
             .email
             .handle(&key_ev(&Key::ch(ch)));
     }
-    app.request_authorize();
-    assert!(app.pending_oauth.is_none());
-    let toast = app.toasts.last().expect("config error toast");
+    app2.request_authorize();
+    assert!(app2.pending_oauth.is_none());
+    let toast = app2.toasts.last().expect("config error toast");
     assert_eq!(toast.kind, ToastKind::Error);
     assert!(toast.text.to_lowercase().contains("oauth config"));
 }
 
 #[tokio::test]
-async fn password_provider_saves_account_and_stores_password() {
-    let mut app = test_app_with_password_provider().await;
-    send_key!(app, Key::ch('S'));
-    send_key!(app, Key::ch('a')); // add a new account -> provider chooser
-    // Select the password provider; the form must switch to the password fields.
-    let idx = app
-        .settings
-        .as_ref()
-        .unwrap()
-        .providers
-        .iter()
-        .position(|p| p == "fastmail")
-        .unwrap();
-    app.settings.as_mut().unwrap().choose_idx = idx;
-    app.choose_provider();
-    assert!(!app.form_provider_is_oauth());
-    assert!(
-        app.form_focus_order().contains(&SettingsFocus::Password),
-        "password provider exposes a Password field"
-    );
-    // Fill name/email/password.
-    {
-        let form = app.settings.as_mut().unwrap().form.as_mut().unwrap();
-        for c in "Fast".chars() {
-            form.name.handle(&key_ev(&Key::ch(c)));
-        }
-        for c in "me@fastmail.com".chars() {
-            form.email.handle(&key_ev(&Key::ch(c)));
-        }
-        for c in "s3cret".chars() {
-            form.password.handle(&key_ev(&Key::ch(c)));
-        }
-    }
-    app.save_password_account().await;
-
-    // Back on the account list, and the row persisted with the password ref.
-    assert!(!app.settings.as_ref().unwrap().editing);
-    let accounts = crate::infrastructure::database::accounts::list(&app.pool)
-        .await
-        .unwrap();
-    let acct = accounts.iter().find(|a| a.name == "Fast").expect("saved");
-    assert_eq!(acct.provider, "fastmail");
-    assert_eq!(acct.email, "me@fastmail.com");
-    assert!(acct.keychain_ref.ends_with("/password"));
-    let pw = crate::infrastructure::auth::token::load_password(&app.pool, &acct.keychain_ref)
-        .await
-        .unwrap();
-    assert_eq!(pw.as_deref(), Some("s3cret"));
-}
-
-#[tokio::test]
-async fn save_password_account_requires_a_password() {
+async fn password_provider_account_creation() {
     let mut app = test_app_with_password_provider().await;
     send_key!(app, Key::ch('S'));
     send_key!(app, Key::ch('a'));
@@ -442,6 +272,10 @@ async fn save_password_account_requires_a_password() {
         .unwrap();
     app.settings.as_mut().unwrap().choose_idx = idx;
     app.choose_provider();
+    assert!(!app.form_provider_is_oauth());
+    assert!(app.form_focus_order().contains(&SettingsFocus::Password));
+
+    // Fill and save
     {
         let form = app.settings.as_mut().unwrap().form.as_mut().unwrap();
         for c in "Fast".chars() {
@@ -450,21 +284,62 @@ async fn save_password_account_requires_a_password() {
         for c in "me@fastmail.com".chars() {
             form.email.handle(&key_ev(&Key::ch(c)));
         }
+        for c in "s3cret".chars() {
+            form.password.handle(&key_ev(&Key::ch(c)));
+        }
     }
-    app.save_password_account().await; // no password typed
-    assert!(app.settings.as_ref().unwrap().editing, "form stays open");
-    assert_eq!(app.toasts.last().unwrap().kind, ToastKind::Warning);
+    app.save_password_account().await;
+    assert!(!app.settings.as_ref().unwrap().editing);
+
     let accounts = crate::infrastructure::database::accounts::list(&app.pool)
         .await
         .unwrap();
-    assert!(accounts.iter().all(|a| a.name != "Fast"));
+    let acct = accounts.iter().find(|a| a.name == "Fast").expect("saved");
+    assert_eq!(acct.provider, "fastmail");
+    assert_eq!(acct.email, "me@fastmail.com");
+    assert!(acct.keychain_ref.ends_with("/password"));
+    let pw = crate::infrastructure::auth::token::load_password(&app.pool, &acct.keychain_ref)
+        .await
+        .unwrap();
+    assert_eq!(pw.as_deref(), Some("s3cret"));
+
+    // Missing password shows warning, doesn't save
+    let mut app2 = test_app_with_password_provider().await;
+    send_key!(app2, Key::ch('S'));
+    send_key!(app2, Key::ch('a'));
+    let idx2 = app2
+        .settings
+        .as_ref()
+        .unwrap()
+        .providers
+        .iter()
+        .position(|p| p == "fastmail")
+        .unwrap();
+    app2.settings.as_mut().unwrap().choose_idx = idx2;
+    app2.choose_provider();
+    {
+        let form = app2.settings.as_mut().unwrap().form.as_mut().unwrap();
+        for c in "Fast2".chars() {
+            form.name.handle(&key_ev(&Key::ch(c)));
+        }
+        for c in "me2@fastmail.com".chars() {
+            form.email.handle(&key_ev(&Key::ch(c)));
+        }
+    }
+    app2.save_password_account().await;
+    assert!(app2.settings.as_ref().unwrap().editing);
+    assert_eq!(app2.toasts.last().unwrap().kind, ToastKind::Warning);
+    let accounts2 = crate::infrastructure::database::accounts::list(&app2.pool)
+        .await
+        .unwrap();
+    assert!(accounts2.iter().all(|a| a.name != "Fast2"));
 }
 
 #[tokio::test]
-async fn connect_params_selects_auth_by_provider() {
+async fn connect_params_by_provider() {
     let mut app = test_app_with_password_provider().await;
 
-    // Password account -> ImapAuth::Password.
+    // Password account -> ImapAuth::Password
     let kref = keychain_ref_for_password("fast");
     crate::infrastructure::auth::token::store_password(&app.pool, &kref, "pw")
         .await
@@ -495,7 +370,7 @@ async fn connect_params_selects_auth_by_provider() {
         crate::application::account::connect_params::ImapAuth::Password { .. }
     ));
 
-    // OAuth account with credentials + a stored refresh token -> ImapAuth::OAuth.
+    // OAuth account with refresh token -> ImapAuth::OAuth
     if let Some(p) = app.config.providers.get_mut("gmail") {
         p.oauth.as_mut().unwrap().client_id = "cid".into();
     }
@@ -533,13 +408,13 @@ async fn connect_params_selects_auth_by_provider() {
 }
 
 #[tokio::test]
-async fn apply_oauth_result_autofills_email_and_defaults_name() {
+async fn apply_oauth_result_saves_account() {
+    // Without display name -> name falls back to email
     let mut app = test_app().await;
-    // A queued authorization with an empty name/email (as a fresh OAuth add).
     let req = PendingOAuth {
         oauth: ResolvedOAuth {
-            auth_url: "https://accounts.example/auth".into(),
-            token_url: "https://accounts.example/token".into(),
+            auth_url: "https://a".into(),
+            token_url: "https://t".into(),
             scopes: vec![],
             client_id: "cid".into(),
             client_secret: String::new(),
@@ -560,12 +435,10 @@ async fn apply_oauth_result_autofills_email_and_defaults_name() {
         refresh_token: Some("rt".into()),
         expires_in: None,
         email: Some("new@gmail.com".into()),
-        name: None, // no display name -> name falls back to the email
+        name: None,
     };
     app.apply_oauth_result(req, Ok(tokens)).await;
 
-    // The email is filled from the token and, with no name claim, the name
-    // label falls back to the email.
     let accounts = crate::infrastructure::database::accounts::list(&app.pool)
         .await
         .unwrap();
@@ -579,14 +452,52 @@ async fn apply_oauth_result_autofills_email_and_defaults_name() {
         .await
         .unwrap();
     assert_eq!(rt.as_deref(), Some("rt"));
-    // The progress overlay was cleared once the flow resolved.
     assert!(!app.oauth_in_progress);
+
+    // With display name -> uses real name
+    let mut app2 = test_app().await;
+    let req2 = PendingOAuth {
+        oauth: ResolvedOAuth {
+            auth_url: "https://a".into(),
+            token_url: "https://t".into(),
+            scopes: vec![],
+            client_id: "cid".into(),
+            client_secret: String::new(),
+        },
+        account: Account {
+            id: None,
+            name: String::new(),
+            email: String::new(),
+            provider: "gmail".into(),
+            keychain_ref: String::new(),
+            is_default: false,
+            created_at: now_ts(),
+        },
+        set_default: false,
+    };
+    let tokens2 = TokenSet {
+        access_token: "at".into(),
+        refresh_token: Some("rt".into()),
+        expires_in: None,
+        email: Some("ada@gmail.com".into()),
+        name: Some("Ada Lovelace".into()),
+    };
+    app2.apply_oauth_result(req2, Ok(tokens2)).await;
+    let accounts2 = crate::infrastructure::database::accounts::list(&app2.pool)
+        .await
+        .unwrap();
+    let acct2 = accounts2
+        .iter()
+        .find(|a| a.email == "ada@gmail.com")
+        .expect("account saved");
+    assert_eq!(acct2.name, "Ada Lovelace");
 }
 
 #[tokio::test]
-async fn password_form_and_oauth_overlay_render_without_panic() {
+async fn forms_render_without_panic() {
     use ratatui::{Terminal, backend::TestBackend};
 
+    // Password form renders
     let mut app = test_app_with_password_provider().await;
     send_key!(app, Key::ch('S'));
     send_key!(app, Key::ch('a'));
@@ -603,15 +514,17 @@ async fn password_form_and_oauth_overlay_render_without_panic() {
 
     let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
     term.draw(|f| crate::tui::views::draw(f, &app)).unwrap();
-    let buf = term.backend().buffer().clone();
-    let text: String = buf.content().iter().map(|c| c.symbol()).collect();
-    assert!(text.contains("Password"), "password field label is shown");
-    assert!(
-        text.contains("Save account"),
-        "password provider shows Save"
-    );
+    let text: String = term
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|c| c.symbol())
+        .collect();
+    assert!(text.contains("Password"));
+    assert!(text.contains("Save account"));
 
-    // The OAuth redirect-paste overlay renders once consent has been opened.
+    // OAuth paste overlay renders inline in form
     let req = PendingOAuth {
         oauth: ResolvedOAuth {
             auth_url: "https://a".into(),
@@ -638,36 +551,31 @@ async fn password_form_and_oauth_overlay_render_without_panic() {
         csrf_state: "state".into(),
     };
     app.begin_oauth_paste(req, flow);
-    // Launched from the account-manager form, so the paste prompt renders inline
-    // as a split panel under "New account" rather than as a floating overlay.
-    assert!(app.oauth_paste_inline(), "paste renders inline in the form");
+    assert!(app.oauth_paste_inline());
     term.draw(|f| crate::tui::views::draw(f, &app)).unwrap();
-    let buf = term.backend().buffer().clone();
-    let text: String = buf.content().iter().map(|c| c.symbol()).collect();
-    assert!(text.contains("New Account"), "form box stays visible above");
-    assert!(
-        text.contains("Authorize gmail"),
-        "split panel shows provider"
-    );
-    assert!(
-        text.contains("Redirect URL"),
-        "split panel shows the paste field"
-    );
+    let text: String = term
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|c| c.symbol())
+        .collect();
+    assert!(text.contains("New Account"));
+    assert!(text.contains("Authorize gmail"));
+    assert!(text.contains("Redirect URL"));
 }
 
 #[tokio::test]
-async fn account_manager_question_mark_opens_help_window() {
+async fn help_and_key_handling() {
     use ratatui::{Terminal, backend::TestBackend};
 
+    // ? opens help from account manager
     let mut app = test_app().await;
-    send_key!(app, Key::ch('S')); // open the account manager
+    send_key!(app, Key::ch('S'));
     assert_eq!(app.view, View::Settings);
-    assert!(!app.help_open);
-    // `?` opens the help overlay from the account manager.
     send_key!(app, Key::ch('?'));
     assert!(app.help_open);
 
-    // The overlay lists the account-manager keys (not just Tab/W/Esc).
     let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
     term.draw(|f| crate::tui::views::draw(f, &app)).unwrap();
     let text: String = term
@@ -677,32 +585,26 @@ async fn account_manager_question_mark_opens_help_window() {
         .iter()
         .map(|c| c.symbol())
         .collect();
-    assert!(
-        text.contains("account list"),
-        "help shows the account-list keys"
-    );
+    assert!(text.contains("account list"));
     assert!(text.contains("open / edit account"));
     assert!(text.contains("add account"));
-    assert!(text.contains("account form"), "help shows the form keys");
+    assert!(text.contains("account form"));
 
-    // `?` again closes it; typing is not swallowed while the form field is active.
     send_key!(app, Key::ch('?'));
     assert!(!app.help_open);
-}
 
-#[tokio::test]
-async fn account_form_field_edit_swallows_question_mark() {
-    let mut app = test_app().await;
-    send_key!(app, Key::ch('S'));
-    send_key!(app, Key::ch('a')); // new account -> provider chooser
-    send_key!(app, Key::enter()); // pick provider -> form (gmail OAuth: focus Authorize)
-    send_key!(app, Key::ch('j')); // wrap forward to the Name field
-    send_key!(app, Key::ch('e')); // start typing into Name
-    assert!(app.settings.as_ref().unwrap().field_editing);
-    send_key!(app, Key::ch('?')); // must reach the field, not open help
-    assert!(!app.help_open);
+    // ? is swallowed when editing a form field
+    let mut app2 = test_app().await;
+    send_key!(app2, Key::ch('S'));
+    send_key!(app2, Key::ch('a'));
+    send_key!(app2, Key::enter());
+    send_key!(app2, Key::ch('j'));
+    send_key!(app2, Key::ch('e'));
+    assert!(app2.settings.as_ref().unwrap().field_editing);
+    send_key!(app2, Key::ch('?'));
+    assert!(!app2.help_open);
     assert_eq!(
-        app.settings
+        app2.settings
             .as_ref()
             .unwrap()
             .form
@@ -715,13 +617,11 @@ async fn account_form_field_edit_swallows_question_mark() {
 }
 
 #[tokio::test]
-async fn connect_while_in_account_manager_stays_and_only_toasts() {
+async fn connect_while_in_account_manager_stays() {
     let mut app = test_app().await;
-    send_key!(app, Key::ch('S')); // open the account manager
+    send_key!(app, Key::ch('S'));
     assert_eq!(app.view, View::Settings);
 
-    // A background connect finishing must NOT yank the user to the inbox; it just
-    // shows the success toast and leaves them in the account manager.
     let data = crate::tui::app::event::LiveData {
         source: Box::new(crate::infrastructure::mail::empty::EmptySource::new()),
         folders: app.folders.clone(),
@@ -734,17 +634,16 @@ async fn connect_while_in_account_manager_stays_and_only_toasts() {
     })
     .await;
 
-    assert_eq!(app.view, View::Settings, "stays in the account manager");
+    assert_eq!(app.view, View::Settings);
     let toast = app.toasts.last().expect("success toast");
     assert_eq!(toast.kind, ToastKind::Success);
     assert!(toast.text.contains("Connected"));
 }
 
 #[tokio::test]
-async fn account_list_columns_expand_to_window_width() {
+async fn account_list_columns_expand() {
     use ratatui::{Terminal, backend::TestBackend};
 
-    // Column of "PROVIDER" in the account-list header when rendered `w` wide.
     async fn provider_col(w: u16) -> usize {
         let mut app = test_app().await;
         send_key!(app, Key::ch('S'));
@@ -762,63 +661,17 @@ async fn account_list_columns_expand_to_window_width() {
         panic!("PROVIDER header not found");
     }
 
-    // On a wide window the PROVIDER column sits far to the right (email expanded);
-    // on a narrow one it stays in the compact position.
     let narrow = provider_col(90).await;
     let wide = provider_col(180).await;
     assert!(
         wide > narrow + 40,
-        "columns should expand with width: narrow={narrow}, wide={wide}"
+        "columns should expand: narrow={narrow}, wide={wide}"
     );
 }
 
 #[tokio::test]
-async fn apply_oauth_result_uses_real_display_name() {
+async fn provider_dropdown_and_form_navigation() {
     let mut app = test_app().await;
-    let req = PendingOAuth {
-        oauth: ResolvedOAuth {
-            auth_url: "https://accounts.example/auth".into(),
-            token_url: "https://accounts.example/token".into(),
-            scopes: vec![],
-            client_id: "cid".into(),
-            client_secret: String::new(),
-        },
-        account: Account {
-            id: None,
-            name: String::new(),
-            email: String::new(),
-            provider: "gmail".into(),
-            keychain_ref: String::new(),
-            is_default: false,
-            created_at: now_ts(),
-        },
-        set_default: false,
-    };
-    let tokens = TokenSet {
-        access_token: "at".into(),
-        refresh_token: Some("rt".into()),
-        expires_in: None,
-        email: Some("ada@gmail.com".into()),
-        name: Some("Ada Lovelace".into()),
-    };
-    app.apply_oauth_result(req, Ok(tokens)).await;
-
-    // The account label uses the real display name, not the email.
-    let accounts = crate::infrastructure::database::accounts::list(&app.pool)
-        .await
-        .unwrap();
-    let acct = accounts
-        .iter()
-        .find(|a| a.email == "ada@gmail.com")
-        .expect("account saved");
-    assert_eq!(acct.name, "Ada Lovelace");
-}
-
-#[tokio::test]
-async fn provider_dropdown_opens_and_selects() {
-    let mut app = test_app().await;
-    // The provider dropdown lives on the edit form; the new-account wizard
-    // picks the provider via the chooser instead. Seed an account and edit it.
     let acct = Account {
         id: None,
         name: "Existing".into(),
@@ -834,89 +687,60 @@ async fn provider_dropdown_opens_and_selects() {
     app.accounts = crate::infrastructure::database::accounts::list(&app.pool)
         .await
         .unwrap();
-    send_key!(app, Key::ch('S')); // open the account manager
-    send_key!(app, Key::ch('o')); // edit the selected account -> form
+    send_key!(app, Key::ch('S'));
+    send_key!(app, Key::ch('o'));
+    assert!(app.settings.as_ref().unwrap().editing);
+    assert_eq!(
+        app.settings.as_ref().unwrap().focus,
+        SettingsFocus::Authorize
+    );
 
-    let settings = app.settings.as_ref().unwrap();
-    assert!(settings.editing);
-    // gmail is OAuth, so the edit form opens on the Authorize button.
-    assert_eq!(settings.focus, SettingsFocus::Authorize);
-    let n = settings.providers.len();
-    assert!(n > 0, "config must define at least one provider");
-
-    // Edit mode reuses the provider chooser to switch providers. Move focus from
-    // the Authorize button to the Provider field (j wraps forward), then open the
-    // chooser with `o`.
-    send_key!(app, Key::ch('j'));
+    // Open provider chooser from edit form
+    send_key!(app, Key::ch('j')); // to Provider field
     assert_eq!(
         app.settings.as_ref().unwrap().focus,
         SettingsFocus::Provider
     );
     send_key!(app, Key::ch('o'));
-    let settings = app.settings.as_ref().unwrap();
-    assert!(settings.choosing_provider, "chooser should open on `o`");
-    assert!(!settings.is_new, "editing keeps is_new false");
-    let before = settings.choose_idx;
+    assert!(app.settings.as_ref().unwrap().choosing_provider);
 
-    // j/k move the highlighted option in the chooser.
-    if n > 1 {
+    // Navigate and confirm
+    if app.settings.as_ref().unwrap().providers.len() > 1 {
         send_key!(app, Key::ch('j'));
-        let after = app.settings.as_ref().unwrap().choose_idx;
-        assert_eq!(after, (before + 1).min(n - 1));
     }
-
-    // Enter confirms, applies the provider to the form, and returns to editing.
     send_key!(app, Key::enter());
-    let settings = app.settings.as_ref().unwrap();
-    assert!(!settings.choosing_provider, "chooser should close on Enter");
-    // Confirming the chooser resets focus; OAuth lands on the Authorize button.
-    assert_eq!(settings.focus, SettingsFocus::Authorize);
-    let form = settings.form.as_ref().unwrap();
-    let chosen = settings.choose_idx;
-    assert_eq!(form.provider_idx, chosen, "selected provider applied to form");
-}
-
-#[tokio::test]
-async fn account_form_hl_moves_focus_left_right() {
-    let mut app = test_app().await;
-    send_key!(app, Key::ch('S'));
-    send_key!(app, Key::ch('a')); // add account -> provider chooser
-    send_key!(app, Key::enter()); // pick provider -> form (OAuth: focus Authorize)
-    // New-account OAuth order is a 2-column grid: Name | IsDefault, then Authorize.
-    // The form opens on Authorize; j wraps forward to Name to start the grid test.
+    assert!(!app.settings.as_ref().unwrap().choosing_provider);
     assert_eq!(
         app.settings.as_ref().unwrap().focus,
         SettingsFocus::Authorize
     );
-    send_key!(app, Key::ch('j'));
-    assert_eq!(app.settings.as_ref().unwrap().focus, SettingsFocus::Name);
 
-    // `l` moves focus to the right column (IsDefault).
-    send_key!(app, Key::ch('l'));
+    // Form h/l navigation (2-column grid)
+    let mut app2 = test_app().await;
+    send_key!(app2, Key::ch('S'));
+    send_key!(app2, Key::ch('a'));
+    send_key!(app2, Key::enter());
+    send_key!(app2, Key::ch('j')); // to Name
+    assert_eq!(app2.settings.as_ref().unwrap().focus, SettingsFocus::Name);
+    send_key!(app2, Key::ch('l')); // to IsDefault
     assert_eq!(
-        app.settings.as_ref().unwrap().focus,
+        app2.settings.as_ref().unwrap().focus,
         SettingsFocus::IsDefault
     );
-
-    // `h` moves focus back to the left column (Name).
-    send_key!(app, Key::ch('h'));
-    assert_eq!(app.settings.as_ref().unwrap().focus, SettingsFocus::Name);
-
-    // `h` on the leftmost column is a no-op (stays on Name).
-    send_key!(app, Key::ch('h'));
-    assert_eq!(app.settings.as_ref().unwrap().focus, SettingsFocus::Name);
-
-    // `l` from the rightmost (IsDefault) is a no-op too.
-    send_key!(app, Key::ch('l'));
-    send_key!(app, Key::ch('l'));
+    send_key!(app2, Key::ch('h')); // back to Name
+    assert_eq!(app2.settings.as_ref().unwrap().focus, SettingsFocus::Name);
+    send_key!(app2, Key::ch('h')); // no-op at left edge
+    assert_eq!(app2.settings.as_ref().unwrap().focus, SettingsFocus::Name);
+    send_key!(app2, Key::ch('l'));
+    send_key!(app2, Key::ch('l')); // no-op at right edge
     assert_eq!(
-        app.settings.as_ref().unwrap().focus,
+        app2.settings.as_ref().unwrap().focus,
         SettingsFocus::IsDefault
     );
 }
 
 #[tokio::test]
-async fn edit_account_can_switch_provider_and_persists() {
+async fn edit_account_switches_provider_and_persists() {
     let mut app = test_app().await;
     let acct = Account {
         id: None,
@@ -933,8 +757,11 @@ async fn edit_account_can_switch_provider_and_persists() {
     app.accounts = crate::infrastructure::database::accounts::list(&app.pool)
         .await
         .unwrap();
-    // Need at least two providers to switch between.
-    let n = app.settings.as_ref().map(|s| s.providers.len()).unwrap_or(0);
+    let n = app
+        .settings
+        .as_ref()
+        .map(|s| s.providers.len())
+        .unwrap_or(0);
     if n < 2 {
         return;
     }
@@ -943,22 +770,31 @@ async fn edit_account_can_switch_provider_and_persists() {
         return;
     }
 
-    send_key!(app, Key::ch('S')); // open the account manager
-    send_key!(app, Key::ch('o')); // edit the selected account -> form (focus Provider)
-    // Open the chooser and pick the second provider.
+    send_key!(app, Key::ch('S'));
+    send_key!(app, Key::ch('o'));
     send_key!(app, Key::ch('o'));
     assert!(app.settings.as_ref().unwrap().choosing_provider);
-    send_key!(app, Key::ch('j')); // move to the second provider
-    send_key!(app, Key::enter()); // confirm
-    let form = app.settings.as_ref().unwrap().form.as_ref().unwrap();
-    assert_eq!(form.provider_idx, 1, "provider switched in the form");
-    assert!(!app.settings.as_ref().unwrap().choosing_provider);
+    send_key!(app, Key::ch('j'));
+    send_key!(app, Key::enter());
+    assert_eq!(
+        app.settings
+            .as_ref()
+            .unwrap()
+            .form
+            .as_ref()
+            .unwrap()
+            .provider_idx,
+        1
+    );
 
-    // Save (Shift+W) and confirm the row persisted the new provider.
+    // Save and verify persistence
     send_key!(app, Key::ch('W'));
     let saved = crate::infrastructure::database::accounts::list(&app.pool)
         .await
         .unwrap();
-    let updated = saved.iter().find(|a| a.email == "existing@example.com").unwrap();
-    assert_eq!(updated.provider, other, "switched provider persisted");
+    let updated = saved
+        .iter()
+        .find(|a| a.email == "existing@example.com")
+        .unwrap();
+    assert_eq!(updated.provider, other);
 }

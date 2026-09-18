@@ -19,13 +19,15 @@ pub trait MailCache: Send + Sync {
     /// Cached message counts `(folder, total, unread)` per folder, for an instant
     /// sidebar estimate before the live count sweep. Counts only cached messages.
     async fn count_by_folder(&self, account_id: i64) -> Result<Vec<(String, usize, usize)>>;
-    /// Store a fetched body (and raw headers when available) for a cached message.
+    /// Store a fetched body (plus the raw HTML source and raw headers when
+    /// available) for a cached message.
     async fn store_body(
         &self,
         account_id: i64,
         folder: &str,
         uid: u64,
         body: &str,
+        raw_html: Option<&str>,
         raw_headers: Option<&str>,
     ) -> Result<()>;
     /// Load a cached message (envelope + body). `body` is empty if not fetched yet.

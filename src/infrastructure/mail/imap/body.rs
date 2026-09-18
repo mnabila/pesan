@@ -1,29 +1,79 @@
 /// Readable body for the reader (and the searchable, cached copy). Prefers an
-/// HTML part - usually the real content - rendered to Markdown (headings,
-/// emphasis, lists, links, tables); falls back to a text/plain part. Some mail
+/// HTML part - usually the real content - kept as raw HTML for the terminal
+/// reader (rendered width-aware at draw time) with a plain-text conversion
+/// alongside for search and quoting; falls back to a text/plain part. Some mail
 /// nests the readable part (multipart/related, forwarded messages) so that part
 /// index 0 is empty, so every HTML then text part is tried before giving up -
 /// otherwise the reader shows a blank pane for a message that does have text.
 /// When there is genuinely no text part, the attachment list is summarized so
 /// the pane still shows something useful.
-pub(crate) fn extract_body(msg: &mail_parser::Message<'_>) -> String {
+pub(crate) struct ExtractedBody {
+    /// Plain searchable text: the text/plain part verbatim, or the HTML part
+    /// converted to text. Also feeds reply/forward quoting.
+    pub text: String,
+    /// Original HTML source when `text` came from an HTML part (capped), so the
+    /// reader can render it faithfully. `None` for plain-text mail.
+    pub raw_html: Option<String>,
+}
+
+/// Cap on the stored HTML source: full newsletters can be megabytes, while the
+/// visible text is a fraction of that. `html2text` tolerates truncation.
+const RAW_HTML_CAP: usize = 128 * 1024;
+
+/// Width the stored plain-text conversion is wrapped to. Only the cached copy
+/// (search, quotes) uses this; the reader re-renders from `raw_html` at the
+/// live pane width.
+const PLAIN_WRAP_WIDTH: usize = 80;
+
+pub(crate) fn extract_body(msg: &mail_parser::Message<'_>) -> ExtractedBody {
+    use mail_parser::MimeHeaders;
     for i in 0..msg.html_body_count() {
+        // `mail_parser` also lists text/plain parts as HTML bodies (it can
+        // auto-convert them); only genuine text/html parts belong on the HTML
+        // path, otherwise a plain message would pointlessly store converted HTML.
+        let is_html = msg
+            .html_part(i as u32)
+            .is_some_and(|p| p.is_content_type("text", "html"));
+        if !is_html {
+            continue;
+        }
         if let Some(html) = msg.body_html(i) {
-            let body = normalize(&render_html(&html));
-            if !body.is_empty() {
-                return body;
+            let text = normalize(&render_html_text(&html));
+            if !text.is_empty() {
+                return ExtractedBody {
+                    text,
+                    raw_html: Some(truncate_html(&html)),
+                };
             }
         }
     }
     for i in 0..msg.text_body_count() {
         if let Some(text) = msg.body_text(i) {
-            let body = normalize(&text);
-            if !body.is_empty() {
-                return body;
+            let text = normalize(&text);
+            if !text.is_empty() {
+                return ExtractedBody {
+                    text,
+                    raw_html: None,
+                };
             }
         }
     }
-    attachment_summary(msg)
+    ExtractedBody {
+        text: attachment_summary(msg),
+        raw_html: None,
+    }
+}
+
+/// Truncate HTML to [`RAW_HTML_CAP`] on a char boundary.
+fn truncate_html(html: &str) -> String {
+    if html.len() <= RAW_HTML_CAP {
+        return html.to_string();
+    }
+    let mut end = RAW_HTML_CAP;
+    while !html.is_char_boundary(end) {
+        end -= 1;
+    }
+    html[..end].to_string()
 }
 
 /// Fallback body for a message with no readable text part (e.g. an attachment-
@@ -68,43 +118,32 @@ fn normalize(body: &str) -> String {
     out.trim_end().to_string()
 }
 
-/// Render an HTML body to Markdown for the terminal reader (and the searchable,
-/// cached copy). Headings, emphasis, lists, links, and tables become their
-/// Markdown equivalents; `<script>`/`<style>`/`<head>` are dropped so embedded
-/// CSS/JS never leaks into the body. On a parse failure, fall back to a crude
-/// tag/entity strip so a malformed part never yields an empty body.
-fn render_html(html: &str) -> String {
-    // Build the converter once per thread rather than per message: the skip-tag
-    // set is constant, and bodies are converted on the single IMAP worker thread.
-    thread_local! {
-        static CONVERTER: htmd::HtmlToMarkdown = htmd::HtmlToMarkdown::builder()
-            .skip_tags(vec!["script", "style", "head", "title"])
-            .build();
-    }
-    CONVERTER
-        .with(|c| c.convert(html))
-        .unwrap_or_else(|_| strip_html(html))
+/// Convert an HTML body to plain searchable text. `display:none` content and
+/// `script`/`style` never reach the output (via the `css` feature + doc CSS),
+/// so embedded CSS/JS and tracking pixels don't leak into search or quotes.
+/// On conversion failure returns empty, letting the caller try the next part.
+///
+/// Known upstream quirk: a doc-CSS rule whose last declaration lacks the
+/// trailing semicolon (e.g. `.hide{display:none}`) is ignored by the CSS
+/// parser; inline `style="display:none"` always applies.
+fn render_html_text(html: &str) -> String {
+    plain_config()
+        .string_from_read(html.as_bytes(), PLAIN_WRAP_WIDTH)
+        .unwrap_or_default()
 }
 
-/// Last-resort HTML-to-text fallback used only when the Markdown conversion
-/// fails: remove `<...>` tags and decode the handful of most common entities.
-fn strip_html(html: &str) -> String {
-    let mut out = String::with_capacity(html.len());
-    let mut in_tag = false;
-    for ch in html.chars() {
-        match ch {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if !in_tag => out.push(ch),
-            _ => {}
-        }
-    }
-    out.replace("&nbsp;", " ")
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
+/// Agent stylesheet mirrored in `tui::html` (duplicated, not shared: neither
+/// layer may import the other for rendering). Drops 1px tracking pixels while
+/// leaving real images alone.
+const AGENT_CSS: &str =
+    "img[width=\"1\"] { display: none; }\nimg[height=\"1\"] { display: none; }\n";
+
+/// Plain converter with doc CSS plus [`AGENT_CSS`], falling back to doc CSS
+/// alone if the static rules ever fail to parse.
+fn plain_config() -> html2text::config::Config<html2text::render::PlainDecorator> {
+    let conf = html2text::config::plain().use_doc_css();
+    conf.add_agent_css(AGENT_CSS)
+        .unwrap_or_else(|_| html2text::config::plain().use_doc_css())
 }
 
 #[cfg(test)]
@@ -113,15 +152,21 @@ mod tests {
     use mail_parser::MessageParser;
 
     #[test]
-    fn strip_html_removes_tags_and_entities() {
-        let html = "<p>Hello&nbsp;<b>world</b> &amp; goodbye</p>";
-        assert_eq!(strip_html(html), "Hello world & goodbye");
-    }
-
-    #[test]
     fn normalize_collapses_blank_runs() {
         let input = "a\n\n\n\nb\n\n";
         assert_eq!(normalize(input), "a\n\nb");
+    }
+
+    #[test]
+    fn extract_body_keeps_tags_in_plain_text_verbatim() {
+        // A text/plain part is stored literally even when it looks like HTML;
+        // the reader shows it verbatim rather than parsing it.
+        let raw =
+            b"From: a@b.com\r\nSubject: Hi\r\nContent-Type: text/plain\r\n\r\n<p>Hello</p>\r\n";
+        let msg = MessageParser::default().parse(raw.as_slice()).unwrap();
+        let out = extract_body(&msg);
+        assert_eq!(out.text, "<p>Hello</p>");
+        assert_eq!(out.raw_html, None);
     }
 
     #[test]
@@ -129,28 +174,79 @@ mod tests {
         let raw =
             b"From: a@b.com\r\nSubject: Hi\r\nContent-Type: text/plain\r\n\r\nHello there\r\n";
         let msg = MessageParser::default().parse(raw.as_slice()).unwrap();
-        assert_eq!(extract_body(&msg), "Hello there");
+        let out = extract_body(&msg);
+        assert_eq!(out.text, "Hello there");
+        assert_eq!(out.raw_html, None);
     }
 
     #[test]
-    fn extract_body_renders_html_structure() {
+    fn extract_body_keeps_raw_html_and_plain_text() {
         let raw = b"From: a@b.com\r\nSubject: Hi\r\nContent-Type: text/html\r\n\r\n\
             <ul><li>Alpha</li><li>Beta</li></ul><p>See <a href=\"https://acme.io/x\">doc</a>.</p>\r\n";
         let msg = MessageParser::default().parse(raw.as_slice()).unwrap();
-        let body = extract_body(&msg);
-        // List items render as Markdown bullets and the link becomes an inline
-        // `[text](url)`, rather than the tags being crudely stripped away.
-        assert!(body.contains("Alpha"), "list item missing: {body:?}");
-        assert!(body.contains("Beta"), "list item missing: {body:?}");
+        let out = extract_body(&msg);
         assert!(
-            body.lines()
-                .any(|l| l.trim_start().starts_with(['*', '-']) && l.contains("Alpha")),
-            "not a Markdown list: {body:?}"
+            out.text.contains("Alpha"),
+            "list item missing: {:?}",
+            out.text
         );
         assert!(
-            body.contains("[doc](https://acme.io/x)"),
-            "link not rendered as Markdown: {body:?}"
+            out.text.contains("Beta"),
+            "list item missing: {:?}",
+            out.text
         );
+        assert!(
+            out.text.contains("doc"),
+            "link text missing: {:?}",
+            out.text
+        );
+        assert!(
+            out.text.contains("https://acme.io/x"),
+            "link target missing: {:?}",
+            out.text
+        );
+        let raw_html = out.raw_html.expect("HTML source must be preserved");
+        assert!(raw_html.contains("<ul>"), "raw HTML kept: {raw_html:?}");
+    }
+
+    #[test]
+    fn extract_body_drops_hidden_and_script_content() {
+        let raw = b"From: a@b.com\r\nSubject: Hi\r\nContent-Type: text/html\r\n\r\n\
+            <style>p.hide { display: none; }</style><script>var x = 1;</script>\
+            <p class=\"hide\">tracking pixel text</p>\
+            <p style=\"display:none\">inline hidden</p><p>Visible hello</p>\r\n";
+        let msg = MessageParser::default().parse(raw.as_slice()).unwrap();
+        let out = extract_body(&msg);
+        assert!(
+            !out.text.contains("tracking pixel"),
+            "hidden text leaked: {:?}",
+            out.text
+        );
+        assert!(
+            !out.text.contains("inline hidden"),
+            "inline hidden text leaked: {:?}",
+            out.text
+        );
+        assert!(!out.text.contains("var x"), "script leaked: {:?}", out.text);
+        assert!(
+            out.text.contains("Visible hello"),
+            "visible lost: {:?}",
+            out.text
+        );
+    }
+
+    #[test]
+    fn extract_body_drops_tracking_pixels_from_plain_text() {
+        let raw = b"From: a@b.com\r\nSubject: Hi\r\nContent-Type: text/html\r\n\r\n\
+            <p>Hello</p><img src=\"https://tracker.x/p.gif\" width=\"1\" height=\"1\" alt=\"\">\r\n";
+        let msg = MessageParser::default().parse(raw.as_slice()).unwrap();
+        let out = extract_body(&msg);
+        assert!(
+            !out.text.contains("tracker.x"),
+            "beacon leaked: {:?}",
+            out.text
+        );
+        assert!(out.text.contains("Hello"), "content lost: {:?}", out.text);
     }
 
     #[test]
@@ -161,13 +257,23 @@ mod tests {
             --BOUND\r\nContent-Type: text/html\r\n\r\n<p>Rich <b>HTML</b> body</p>\r\n\
             --BOUND--\r\n";
         let msg = MessageParser::default().parse(raw.as_slice()).unwrap();
-        let body = extract_body(&msg);
-        assert!(body.contains("Rich"), "HTML part not rendered: {body:?}");
-        assert!(body.contains("HTML"), "HTML part not rendered: {body:?}");
+        let out = extract_body(&msg);
         assert!(
-            !body.contains("plain fallback"),
-            "should prefer HTML over the text/plain part: {body:?}"
+            out.text.contains("Rich"),
+            "HTML part not rendered: {:?}",
+            out.text
         );
+        assert!(
+            out.text.contains("HTML"),
+            "HTML part not rendered: {:?}",
+            out.text
+        );
+        assert!(
+            !out.text.contains("plain fallback"),
+            "should prefer HTML over the text/plain part: {:?}",
+            out.text
+        );
+        assert!(out.raw_html.is_some());
     }
 
     #[test]
@@ -179,9 +285,26 @@ mod tests {
             Content-Disposition: attachment; filename=\"invoice.pdf\"\r\n\r\n%PDF-1.4\r\n\
             --B--\r\n";
         let msg = MessageParser::default().parse(raw.as_slice()).unwrap();
-        let body = extract_body(&msg);
-        assert!(body.contains("no text content"), "unexpected body: {body:?}");
-        assert!(body.contains("invoice.pdf"), "attachment not listed: {body:?}");
+        let out = extract_body(&msg);
+        assert!(
+            out.text.contains("no text content"),
+            "unexpected body: {:?}",
+            out.text
+        );
+        assert!(
+            out.text.contains("invoice.pdf"),
+            "attachment not listed: {:?}",
+            out.text
+        );
+        assert_eq!(out.raw_html, None);
+    }
+
+    #[test]
+    fn raw_html_is_capped() {
+        let big = format!("<p>{}</p>", "x".repeat(RAW_HTML_CAP + 100));
+        let capped = truncate_html(&big);
+        assert!(capped.len() <= RAW_HTML_CAP);
+        assert!(big.starts_with(&capped[..capped.len().min(100)]));
     }
 
     #[test]

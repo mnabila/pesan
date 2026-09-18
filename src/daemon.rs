@@ -464,7 +464,14 @@ async fn prefetch_bodies(
             Ok(msg) => {
                 let _ = services
                     .cache
-                    .store_body(account_id, folder, uid, &msg.body, msg.raw_headers.as_deref())
+                    .store_body(
+                        account_id,
+                        folder,
+                        uid,
+                        &msg.body,
+                        msg.raw_html.as_deref(),
+                        msg.raw_headers.as_deref(),
+                    )
                     .await;
             }
             Err(e) => tracing::debug!("daemon: prefetch {folder}/{uid} failed: {e}"),

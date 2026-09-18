@@ -141,21 +141,24 @@ pub async fn load_envelopes(db: &Db, account_id: i64, folder: &str) -> Result<Ve
     rows.iter().map(row_to_envelope).collect()
 }
 
-/// Store a fetched body (and, when available, the raw RFC822 header block) for a
-/// cached message, so a later open - even offline - can show the full headers.
+/// Store a fetched body (plus the raw HTML source and raw RFC822 header block
+/// when available) for a cached message, so a later open - even offline - can
+/// render faithfully and show the full headers.
 pub async fn store_body(
     db: &Db,
     account_id: i64,
     folder: &str,
     uid: u64,
     body: &str,
+    raw_html: Option<&str>,
     raw_headers: Option<&str>,
 ) -> Result<()> {
     sqlx::query(
-        "UPDATE messages SET body = ?, raw_headers = ? \
+        "UPDATE messages SET body = ?, raw_html = ?, raw_headers = ? \
          WHERE account_id = ? AND folder = ? AND uid = ?",
     )
     .bind(body)
+    .bind(raw_html)
     .bind(raw_headers)
     .bind(account_id)
     .bind(folder)
@@ -173,7 +176,7 @@ pub async fn load_message(
     uid: u64,
 ) -> Result<Option<Message>> {
     let sql = format!(
-        "SELECT {ENVELOPE_COLS}, body, raw_headers FROM messages \
+        "SELECT {ENVELOPE_COLS}, body, raw_html, raw_headers FROM messages \
          WHERE account_id = ? AND folder = ? AND uid = ?"
     );
     let row = sqlx::query(&sql)
@@ -185,10 +188,12 @@ pub async fn load_message(
     let Some(r) = row else { return Ok(None) };
     let envelope = row_to_envelope(&r)?;
     let body: Option<String> = r.try_get(10)?;
-    let raw_headers: Option<String> = r.try_get(11)?;
+    let raw_html: Option<String> = r.try_get(11)?;
+    let raw_headers: Option<String> = r.try_get(12)?;
     Ok(Some(Message {
         envelope,
         body: body.unwrap_or_default(),
+        raw_html,
         raw_headers,
     }))
 }
@@ -372,9 +377,19 @@ impl MailCache for SqliteMailCache {
         folder: &str,
         uid: u64,
         body: &str,
+        raw_html: Option<&str>,
         raw_headers: Option<&str>,
     ) -> Result<()> {
-        store_body(&self.db, account_id, folder, uid, body, raw_headers).await
+        store_body(
+            &self.db,
+            account_id,
+            folder,
+            uid,
+            body,
+            raw_html,
+            raw_headers,
+        )
+        .await
     }
 
     async fn load_message(
@@ -487,6 +502,7 @@ mod tests {
             "INBOX",
             10,
             "let us discuss the roadmap sequencing",
+            Some("<p>let us discuss the roadmap sequencing</p>"),
             Some("Subject: Q3 roadmap review\r\nFrom: jane@acme.io"),
         )
         .await
@@ -504,6 +520,10 @@ mod tests {
         let msg = load_message(&c, 1, "INBOX", 10).await.unwrap().unwrap();
         assert!(msg.envelope.flags.seen);
         assert_eq!(msg.body, "let us discuss the roadmap sequencing");
+        assert_eq!(
+            msg.raw_html.as_deref(),
+            Some("<p>let us discuss the roadmap sequencing</p>")
+        );
         // Raw headers persist through the cache (and survive the re-upsert) so
         // the reader can show full headers offline after one open.
         assert_eq!(

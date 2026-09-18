@@ -107,6 +107,14 @@ const SCHEMA_V4: &str = r#"
 ALTER TABLE messages ADD COLUMN raw_headers TEXT;
 "#;
 
+/// Persist the original HTML source alongside the plain-text body, so the
+/// reader can render width-aware styled lines (and the browser export can use
+/// the faithful source) without refetching. `NULL` for plain-text mail and for
+/// rows cached before this migration, which keep rendering from `body`.
+const SCHEMA_V5: &str = r#"
+ALTER TABLE messages ADD COLUMN raw_html TEXT;
+"#;
+
 /// Open (creating if needed) the per-user database at `path` and run migrations.
 /// Passing `":memory:"` gives an in-memory DB (with schema) for tests.
 ///
@@ -194,6 +202,17 @@ async fn migrate(pool: &Db) -> Result<()> {
             .context("set user_version")?;
         tracing::info!("db migrated to version 4 (cached raw headers)");
     }
+    if version < 5 {
+        sqlx::raw_sql(SCHEMA_V5)
+            .execute(pool)
+            .await
+            .context("migrate db to v5")?;
+        sqlx::raw_sql("PRAGMA user_version = 5;")
+            .execute(pool)
+            .await
+            .context("set user_version")?;
+        tracing::info!("db migrated to version 5 (cached raw HTML)");
+    }
     Ok(())
 }
 
@@ -208,7 +227,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version, 5);
     }
 
     #[tokio::test]

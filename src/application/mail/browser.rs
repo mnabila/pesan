@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::process::Command;
 
 use anyhow::{Context, Result};
 
@@ -91,29 +92,19 @@ fn header_value(raw: &str, name: &str) -> Option<String> {
     None
 }
 
-/// Render cached Markdown to an HTML fragment (same GFM set as compose).
-fn markdown_to_html(md: &str) -> String {
-    use pulldown_cmark::{Options, Parser, html};
-    let mut opts = Options::empty();
-    opts.insert(Options::ENABLE_TABLES);
-    opts.insert(Options::ENABLE_STRIKETHROUGH);
-    opts.insert(Options::ENABLE_TASKLISTS);
-    opts.insert(Options::ENABLE_FOOTNOTES);
-    opts.insert(Options::ENABLE_GFM);
-    let parser = Parser::new_ext(md, opts);
-    let mut out = String::new();
-    html::push_html(&mut out, parser);
-    out
-}
-
-/// Full HTML document for `msg`, with a header block and the Markdown body
-/// rendered to HTML. `to` is the resolved recipient (see [`resolve_to`]).
+/// Full HTML document for `msg`, with a header block and the message content:
+/// the stored raw HTML source when available (faithful), else the plain-text
+/// body wrapped in <pre> for faithful rendering. `to` is the resolved recipient
+/// (see [`resolve_to`]).
 pub fn message_to_html(msg: &Message, to: &str) -> String {
     let subject = escape_html(&msg.envelope.subject);
     let from = escape_html(&msg.envelope.from.display());
     let to = escape_html(to);
     let date = escape_html(&full_timestamp(msg.envelope.date));
-    let body = markdown_to_html(&msg.body);
+    let body = match msg.raw_html.as_deref().filter(|h| !h.trim().is_empty()) {
+        Some(html) => html.to_string(),
+        None => format!("<pre>{}</pre>", escape_html(&msg.body)),
+    };
     format!(
         "<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
@@ -130,6 +121,44 @@ pub fn export_message(account: &str, folder: &str, msg: &Message, to: &str) -> R
     let path = export_path(account, folder, msg.envelope.uid);
     let doc = message_to_html(msg, to);
     std::fs::write(&path, doc).with_context(|| format!("write {}", path.display()))?;
+    Ok(path)
+}
+
+/// Open a file/URL in the browser using the configured command or system default.
+/// `browser_cmd` can be a full command with arguments (e.g., "firefox --new-window").
+/// Runs the browser in the background with output silenced.
+pub fn open_in_browser(path: &std::path::Path, browser_cmd: Option<&str>) -> Result<()> {
+    if let Some(cmd) = browser_cmd.filter(|s| !s.is_empty()) {
+        let parts: Vec<&str> = cmd.split_whitespace().collect();
+        if parts.is_empty() {
+            return Err(anyhow::anyhow!("empty browser command"));
+        }
+        let mut command = Command::new(parts[0]);
+        if parts.len() > 1 {
+            command.args(&parts[1..]);
+        }
+        command
+            .arg(path)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .with_context(|| format!("spawn browser: {}", cmd))?;
+    } else {
+        open::that_detached(path).with_context(|| format!("open with system default: {}", path.display()))?;
+    }
+    Ok(())
+}
+
+/// Export message and open in browser with optional custom browser command.
+pub fn export_and_open_message(
+    account: &str,
+    folder: &str,
+    msg: &Message,
+    to: &str,
+    browser_cmd: Option<&str>,
+) -> Result<PathBuf> {
+    let path = export_message(account, folder, msg, to)?;
+    open_in_browser(&path, browser_cmd)?;
     Ok(path)
 }
 
@@ -154,6 +183,7 @@ mod tests {
                 snippet: None,
             },
             body: body.into(),
+            raw_html: None,
             raw_headers: raw.map(str::to_string),
         }
     }
@@ -181,6 +211,15 @@ mod tests {
         assert!(doc.contains("<h1>"));
         assert!(doc.contains("Hello"));
         assert!(doc.contains("ada@example.com"));
+    }
+
+    #[test]
+    fn prefers_stored_raw_html() {
+        let mut m = msg(1, "subj", "plain fallback", None);
+        m.raw_html = Some("<p>Faithful <b>source</b></p>".to_string());
+        let doc = message_to_html(&m, "bob@x.io");
+        assert!(doc.contains("Faithful <b>source</b>"));
+        assert!(!doc.contains("plain fallback"));
     }
 
     #[test]

@@ -157,7 +157,7 @@ struct ReconnectCtx {
     was_reading: bool,
 }
 
-/// Memoized reader render: the Markdown body laid out into styled lines at a
+/// Memoized reader render: the message body laid out into styled lines at a
 /// given wrap width. Reused across frames (scroll, spinner ticks) so a repaint
 /// doesn't re-parse the whole body; rebuilt when the width changes or
 /// `reader_dirty` is set (new body, theme swap).
@@ -208,10 +208,11 @@ pub struct App {
     pub marked: HashSet<u64>,
     pub open_message: Option<Message>,
     pub reader_offset: usize,
-    /// Memoized Markdown->`Line` render of `open_message.body`. The reader
-    /// repaints on every keystroke and spinner tick, so re-parsing the whole
-    /// body each frame is wasteful; this caches the rendered lines and is only
-    /// recomputed when the body, wrap width, theme, or ascii toggle changes.
+    /// Memoized body render (`open_message` HTML or plain text) into styled
+    /// lines. The reader repaints on every keystroke and spinner tick, so
+    /// re-parsing the whole body each frame is wasteful; this caches the
+    /// rendered lines and is only recomputed when the body, wrap width, theme,
+    /// or ascii toggle changes.
     reader_cache: Option<ReaderCache>,
     /// Set when an input to the reader render changed (new body, theme swap),
     /// forcing `prepare_reader` to rebuild `reader_cache` on the next frame.
@@ -450,7 +451,7 @@ impl App {
         self.reader_dirty = true;
     }
 
-    /// The Markdown wrap width for the reader: the full terminal width minus the
+    /// The reader wrap width: the full terminal width minus the
     /// reader pane's left/right border columns. Kept as one helper so the render
     /// (`prepare_reader`) and the draw code agree on the width.
     pub fn reader_wrap_width(total_width: u16) -> usize {
@@ -459,7 +460,7 @@ impl App {
 
     /// Rebuild the memoized reader render if stale. Called once per frame from
     /// the event loop (before `tui::draw`, which must not mutate). The expensive
-    /// Markdown parse + layout runs only when the body/theme/ascii changed
+    /// HTML/Markdown parse + layout runs only when the body/theme/ascii changed
     /// (`reader_dirty`) or the wrap width changed - not on every scroll or tick.
     pub fn prepare_reader(&mut self, total_width: u16) {
         if self.view != View::Reader {
@@ -480,7 +481,7 @@ impl App {
         // Render into a local so the immutable borrow of `self` ends before the
         // `reader_cache` write below.
         let lines =
-            crate::tui::markdown::render(&msg.body, wrap_width, &self.theme, self.config.ui.ascii);
+            crate::tui::html::render_message(msg, wrap_width, &self.theme, self.config.ui.ascii);
         self.reader_cache = Some(ReaderCache { wrap_width, lines });
         self.reader_dirty = false;
     }

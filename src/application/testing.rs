@@ -45,8 +45,9 @@ impl AccountRepo for FakeAccountRepo {
 pub struct FakeMailCache {
     /// Envelopes per `(account_id, folder)` as `load_envelopes` returns them.
     pub envelopes: HashMap<(i64, String), Vec<Envelope>>,
-    /// Cached bodies per `(account_id, folder, uid)`.
-    pub bodies: HashMap<(i64, String, u64), (String, Option<String>)>,
+    /// Cached bodies per `(account_id, folder, uid)`: plain text plus the raw
+    /// HTML source and raw headers when available.
+    pub bodies: HashMap<(i64, String, u64), (String, Option<String>, Option<String>)>,
     /// Accounts that "have mail" (drives `has_messages`).
     pub populated: Vec<i64>,
 }
@@ -105,6 +106,7 @@ impl MailCache for FakeMailCache {
         _folder: &str,
         _uid: u64,
         _body: &str,
+        _raw_html: Option<&str>,
         _raw_headers: Option<&str>,
     ) -> Result<()> {
         Ok(())
@@ -123,7 +125,7 @@ impl MailCache for FakeMailCache {
         else {
             return Ok(None);
         };
-        let (body, raw_headers) = self
+        let (body, raw_html, raw_headers) = self
             .bodies
             .get(&(account_id, folder.to_string(), uid))
             .cloned()
@@ -131,6 +133,7 @@ impl MailCache for FakeMailCache {
         Ok(Some(Message {
             envelope: env.clone(),
             body,
+            raw_html,
             raw_headers,
         }))
     }

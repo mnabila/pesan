@@ -1,6 +1,6 @@
 pub mod app;
+pub mod html;
 pub mod keymap;
-pub mod markdown;
 pub mod theme;
 pub mod views;
 pub mod widgets;
