@@ -121,9 +121,16 @@ pub struct Message {
     #[serde(default)]
     pub raw_html: Option<String>,
     /// Raw RFC822 header block (everything before the first blank line), when
-    /// available. Populated by the live IMAP fetch; `None` for cached messages
-    /// (only the body is cached). Shown by the reader's "full headers" toggle.
+    /// available. Populated by the live IMAP fetch and re-derived from the
+    /// Maildir file on a cached open. Shown by the reader's "full headers" toggle.
     pub raw_headers: Option<String>,
+    /// The complete raw RFC822 message bytes, present only right after a live
+    /// fetch. Carried so the cache can persist the message verbatim to its
+    /// Maildir file (the interoperable, mutt/mbsync-readable on-disk copy);
+    /// `None` on cached reads. Serialized so it survives the daemon IPC hop and
+    /// the client-side write-through can file it too.
+    #[serde(default)]
+    pub raw: Option<Vec<u8>>,
 }
 
 /// A file staged to be sent with a message. The bytes are read lazily at send

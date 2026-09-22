@@ -8,7 +8,7 @@ use crate::domain::Envelope;
 /// its in-memory fallback.
 pub async fn search_cache(
     svc: &Services,
-    account_id: Option<i64>,
+    account_id: Option<&str>,
     folder: &str,
     term: &str,
 ) -> Result<Option<Vec<Envelope>>> {
@@ -63,7 +63,7 @@ mod tests {
             }
             async fn offline_source(
                 &self,
-                _: Option<i64>,
+                _: Option<&str>,
             ) -> Box<dyn crate::application::MailSource> {
                 panic!()
             }
@@ -90,19 +90,19 @@ mod tests {
     #[tokio::test]
     async fn no_cache_falls_back_to_in_memory() {
         let s = svc(FakeMailCache::default());
-        let out = search_cache(&s, Some(7), "INBOX", "hello").await.unwrap();
+        let out = search_cache(&s, Some("a7"), "INBOX", "hello").await.unwrap();
         assert!(out.is_none());
     }
 
     #[tokio::test]
     async fn cached_mail_searches_the_whole_folder() {
-        let mut c = FakeMailCache::cached(7);
+        let mut c = FakeMailCache::cached("a7");
         c.envelopes.insert(
-            (7, "INBOX".to_string()),
+            ("a7".to_string(), "INBOX".to_string()),
             vec![env("Quarterly report"), env("lunch plans")],
         );
         let s = svc(c);
-        let out = search_cache(&s, Some(7), "INBOX", "quarterly")
+        let out = search_cache(&s, Some("a7"), "INBOX", "quarterly")
             .await
             .unwrap()
             .expect("cache search should run");
@@ -112,7 +112,7 @@ mod tests {
 
     #[tokio::test]
     async fn no_account_row_falls_back_to_in_memory() {
-        let s = svc(FakeMailCache::cached(7));
+        let s = svc(FakeMailCache::cached("a7"));
         let out = search_cache(&s, None, "INBOX", "hello").await.unwrap();
         assert!(out.is_none());
     }

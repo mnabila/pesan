@@ -177,14 +177,15 @@ async fn sidebar_account_switching() {
     let accounts = crate::infrastructure::database::accounts::list(&conn)
         .await
         .unwrap();
+    let maildir = super::scratch_maildir();
     for a in &accounts {
-        seed_fixture_cache(&conn, a.id.unwrap()).await;
+        seed_fixture_cache(&conn, &maildir, a.id.as_deref().unwrap()).await;
     }
     let mut app = App::new(
         config,
         conn.clone(),
         accounts,
-        crate::infrastructure::sqlite_services(conn.clone()),
+        crate::infrastructure::sqlite_services_with_maildir(conn.clone(), maildir),
     )
     .await;
     app.focus = Pane::Folders;

@@ -38,7 +38,11 @@ pub(crate) use send_key;
 /// so tests exercise the actual `CacheSource` path instead of any fixtures. The
 /// pool is capped at one connection, so the same `:memory:` pool the App clones
 /// into its `CacheSource` sees these rows.
-async fn seed_fixture_cache(conn: &database::Db, account_id: i64) {
+async fn seed_fixture_cache(
+    conn: &database::Db,
+    maildir: &crate::infrastructure::mail::maildir::MaildirStore,
+    account_id: &str,
+) {
     use crate::domain::{Flags, FolderCategory};
     let mailbox = FolderCategory::Mailbox;
     let label = FolderCategory::Label;
@@ -91,17 +95,12 @@ async fn seed_fixture_cache(conn: &database::Db, account_id: i64) {
     database::cache::upsert_envelopes(conn, account_id, "INBOX", &inbox)
         .await
         .unwrap();
-    database::cache::store_body(
-        conn,
-        account_id,
-        "INBOX",
-        1,
-        "Let us discuss the roadmap sequencing.",
-        None,
-        Some("Subject: Q3 roadmap review\r\nFrom: jane@acme.io\r\nDate: Mon, 1 Jan 2024 09:00:00 +0000"),
-    )
-    .await
-    .unwrap();
+    let raw: &[u8] = b"Subject: Q3 roadmap review\r\nFrom: jane@acme.io\r\n\
+Date: Mon, 1 Jan 2024 09:00:00 +0000\r\nContent-Type: text/plain\r\n\r\n\
+Let us discuss the roadmap sequencing.\r\n";
+    database::cache::store_body(conn, maildir, account_id, "INBOX", 1, Some(raw))
+        .await
+        .unwrap();
 }
 
 async fn test_app() -> App {
@@ -118,7 +117,8 @@ async fn test_app() -> App {
     let id = crate::infrastructure::database::accounts::upsert(&conn, &account)
         .await
         .unwrap();
-    seed_fixture_cache(&conn, id).await;
+    let maildir = scratch_maildir();
+    seed_fixture_cache(&conn, &maildir, &id).await;
     let accounts = crate::infrastructure::database::accounts::list(&conn)
         .await
         .unwrap();
@@ -126,9 +126,23 @@ async fn test_app() -> App {
         Config::default(),
         conn.clone(),
         accounts,
-        crate::infrastructure::sqlite_services(conn.clone()),
+        crate::infrastructure::sqlite_services_with_maildir(conn.clone(), maildir),
     )
     .await
+}
+
+/// An isolated, per-call temp Maildir root so tests never touch the real data
+/// dir and never collide with each other.
+fn scratch_maildir() -> crate::infrastructure::mail::maildir::MaildirStore {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let p = std::env::temp_dir().join(format!(
+        "pesan-test-md-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = std::fs::remove_dir_all(&p);
+    crate::infrastructure::mail::maildir::MaildirStore::new(p)
 }
 
 fn temp_db_path() -> PathBuf {
@@ -192,7 +206,8 @@ async fn test_app_with_password_provider() -> App {
     let id = crate::infrastructure::database::accounts::upsert(&conn, &account)
         .await
         .unwrap();
-    seed_fixture_cache(&conn, id).await;
+    let maildir = scratch_maildir();
+    seed_fixture_cache(&conn, &maildir, &id).await;
     let accounts = crate::infrastructure::database::accounts::list(&conn)
         .await
         .unwrap();
@@ -215,7 +230,7 @@ async fn test_app_with_password_provider() -> App {
         config,
         conn.clone(),
         accounts,
-        crate::infrastructure::sqlite_services(conn.clone()),
+        crate::infrastructure::sqlite_services_with_maildir(conn.clone(), maildir),
     )
     .await
 }

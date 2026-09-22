@@ -7,7 +7,7 @@ use crate::domain::{Envelope, Message};
 /// to a direct source read, handled by the shell).
 pub async fn open_message(
     svc: &Services,
-    account_id: Option<i64>,
+    account_id: Option<&str>,
     folder: &str,
     env: &Envelope,
     live: bool,
@@ -31,6 +31,7 @@ pub async fn open_message(
             body: "Loading message...".to_string(),
             raw_html: None,
             raw_headers: None,
+            raw: None,
         });
         let effect = if shown && had_headers {
             None
@@ -97,7 +98,7 @@ mod tests {
             ) -> anyhow::Result<Box<dyn MailSource>> {
                 panic!("backend must not be used by open_message");
             }
-            async fn offline_source(&self, _: Option<i64>) -> Box<dyn MailSource> {
+            async fn offline_source(&self, _: Option<&str>) -> Box<dyn MailSource> {
                 panic!("backend must not be used by open_message");
             }
         }
@@ -120,12 +121,12 @@ mod tests {
         }
     }
 
-    fn cache_with_full_copy(account: i64) -> FakeMailCache {
+    fn cache_with_full_copy(account: &str) -> FakeMailCache {
         let mut c = FakeMailCache::cached(account);
         c.envelopes
-            .insert((account, "INBOX".to_string()), vec![env(1)]);
+            .insert((account.to_string(), "INBOX".to_string()), vec![env(1)]);
         c.bodies.insert(
-            (account, "INBOX".to_string(), 1),
+            (account.to_string(), "INBOX".to_string(), 1),
             ("body".to_string(), None, Some("From: ada".to_string())),
         );
         c
@@ -133,19 +134,19 @@ mod tests {
 
     #[tokio::test]
     async fn full_cache_hit_skips_revalidate() {
-        let s = svc(cache_with_full_copy(7));
-        let out = open_message(&s, Some(7), "INBOX", &env(1), true).await;
+        let s = svc(cache_with_full_copy("a7"));
+        let out = open_message(&s, Some("a7"), "INBOX", &env(1), true).await;
         assert_eq!(out.immediate.unwrap().body, "body");
         assert!(out.effect.is_none());
     }
 
     #[tokio::test]
     async fn partial_cache_revalidates() {
-        let account = 7i64;
+        let account = "a7";
         let mut c = cache_with_full_copy(account);
         // Same envelope cached but with no raw headers -> incomplete copy.
         c.bodies.insert(
-            (account, "INBOX".to_string(), 1),
+            (account.to_string(), "INBOX".to_string(), 1),
             ("body".to_string(), None, None),
         );
         let s = svc(c);
@@ -161,8 +162,8 @@ mod tests {
 
     #[tokio::test]
     async fn no_cache_shows_placeholder_when_live() {
-        let s = svc(FakeMailCache::cached(7));
-        let out = open_message(&s, Some(7), "INBOX", &env(2), true).await;
+        let s = svc(FakeMailCache::cached("a7"));
+        let out = open_message(&s, Some("a7"), "INBOX", &env(2), true).await;
         let msg = out.immediate.unwrap();
         assert_eq!(msg.envelope.uid, 2);
         assert_eq!(msg.body, "Loading message...");
@@ -171,8 +172,8 @@ mod tests {
 
     #[tokio::test]
     async fn offline_without_cache_returns_nothing() {
-        let s = svc(FakeMailCache::cached(7));
-        let out = open_message(&s, Some(7), "INBOX", &env(3), false).await;
+        let s = svc(FakeMailCache::cached("a7"));
+        let out = open_message(&s, Some("a7"), "INBOX", &env(3), false).await;
         assert!(out.immediate.is_none());
         assert!(out.effect.is_none());
     }

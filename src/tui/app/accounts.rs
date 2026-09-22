@@ -19,7 +19,7 @@ impl App {
         if let Some(account) = state.accounts.get(idx).cloned()
             && let Some(account_id) = account.id
         {
-            let _ = self.services.accounts.set_default(account_id).await;
+            let _ = self.services.accounts.set_default(&account_id).await;
             self.reload_accounts().await;
             self.set_toast(
                 format!("{} is now the default account", account.name),
@@ -80,7 +80,7 @@ impl App {
             .unwrap_or_default();
 
         let account = Account {
-            id: existing.as_ref().and_then(|a| a.id),
+            id: existing.as_ref().and_then(|a| a.id.clone()),
             name,
             email,
             provider: provider_key,
@@ -330,7 +330,7 @@ impl App {
             .unwrap_or_else(|| keychain_ref_for_password(&name));
         let is_default = form.is_default;
         let account = Account {
-            id: existing.as_ref().and_then(|a| a.id),
+            id: existing.as_ref().and_then(|a| a.id.clone()),
             name,
             email,
             provider: provider_key,
@@ -608,7 +608,7 @@ impl App {
                     (None, None)
                 } else {
                     (
-                        state.accounts.get(state.selected).and_then(|a| a.id),
+                        state.accounts.get(state.selected).and_then(|a| a.id.clone()),
                         state.accounts.get(state.selected).cloned(),
                     )
                 };
@@ -625,7 +625,7 @@ impl App {
                 if let Ok(saved_id) = self.services.accounts.upsert(&account).await
                     && is_default
                 {
-                    let _ = self.services.accounts.set_default(saved_id).await;
+                    let _ = self.services.accounts.set_default(&saved_id).await;
                 }
             }
 

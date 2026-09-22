@@ -185,6 +185,7 @@ mod tests {
             body: body.into(),
             raw_html: None,
             raw_headers: raw.map(str::to_string),
+            raw: None,
         }
     }
 

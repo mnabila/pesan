@@ -553,6 +553,7 @@ mod tests {
             body: "<p>Hello <b>there</b></p>".into(),
             raw_html: None,
             raw_headers: None,
+            raw: None,
         };
         let out = text(&render_message(&msg, 60, &theme(), false));
         assert!(!out.trim().is_empty(), "message rendered blank");
@@ -618,6 +619,7 @@ mod tests {
             body: "plain fallback".into(),
             raw_html: Some("<p>Rich <b>html</b></p>".into()),
             raw_headers: None,
+            raw: None,
         };
         let out = text(&render_message(&msg, 60, &theme(), false));
         assert!(out.contains("Rich"), "HTML path not used: {out:?}");

@@ -28,5 +28,5 @@ pub trait MailBackend: Send + Sync {
 
     /// Build the offline display source for an account: cache-backed when the
     /// account has cached mail, else an empty source.
-    async fn offline_source(&self, account_id: Option<i64>) -> Box<dyn MailSource>;
+    async fn offline_source(&self, account_id: Option<&str>) -> Box<dyn MailSource>;
 }

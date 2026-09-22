@@ -33,6 +33,14 @@ pub fn db_path() -> Result<PathBuf> {
     Ok(data_dir()?.join("pesan.db"))
 }
 
+/// Root of the on-disk Maildir tree that mirrors cached message bodies as
+/// interoperable RFC822 files (`<maildir>/<account_id>/<folder>/{tmp,new,cur}`),
+/// so other mail tools (mutt, mbsync) can read them. The SQLite DB stays the
+/// fast index for listing/search; the files are the message content of record.
+pub fn maildir_dir() -> Result<PathBuf> {
+    Ok(data_dir()?.join("maildir"))
+}
+
 /// Unix socket the `pesan daemon` listens on and the TUI client dials. Prefers
 /// the XDG runtime dir (`$XDG_RUNTIME_DIR/pesan/daemon.sock`, tmpfs, cleared on
 /// logout), falling back to the data dir on platforms without one.

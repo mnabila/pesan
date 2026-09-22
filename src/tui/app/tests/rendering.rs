@@ -20,7 +20,7 @@ async fn offline_first_shows_cache_and_fts_search() {
         .unwrap();
     database::cache::upsert_folders(
         &conn,
-        id,
+        &id,
         &[Folder {
             name: "INBOX".to_string(),
             total: 2,
@@ -32,7 +32,7 @@ async fn offline_first_shows_cache_and_fts_search() {
         .unwrap();
     database::cache::upsert_envelopes(
         &conn,
-        id,
+        &id,
         "INBOX",
         &[
             Envelope {
@@ -100,6 +100,7 @@ async fn reader_shows_real_recipient_from_headers() {
         body: "hello world".to_string(),
         raw_html: None,
         raw_headers: Some("From: you@gmail.com\nTo: dest@other.com\nSubject: hello world".to_string()),
+        raw: None,
     });
     app.view = View::Reader;
 
@@ -411,6 +412,7 @@ async fn reader_wraps_long_lines() {
         body: long,
         raw_html: None,
         raw_headers: None,
+        raw: None,
     });
 
     let w = 60u16;

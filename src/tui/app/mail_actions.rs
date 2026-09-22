@@ -70,7 +70,7 @@ impl App {
             let _ = self
                 .services
                 .cache
-                .set_flags(id, &folder, uid, seen, flag)
+                .set_flags(&id, &folder, uid, seen, flag)
                 .await;
         }
         if let Some(msg) = &mut self.open_message
@@ -123,7 +123,7 @@ impl App {
                 let _ = self
                     .services
                     .cache
-                    .set_flags(id, &folder, uid, Some(true), None)
+                    .set_flags(&id, &folder, uid, Some(true), None)
                     .await;
             }
         } else {
@@ -216,7 +216,7 @@ impl App {
             && let Some(id) = self.active_account_id()
         {
             let folder = self.selected_folder_name().to_string();
-            let _ = self.services.cache.delete_message(id, &folder, uid).await;
+            let _ = self.services.cache.delete_message(&id, &folder, uid).await;
         }
         let idx = self.display_envelopes.iter().position(|e| e.uid == uid);
         self.envelopes.retain(|e| e.uid != uid);
@@ -306,7 +306,7 @@ impl App {
                     // DB fallback cleared too).
                     let _ = crate::application::account::onboarding::delete_account(
                         &self.services,
-                        account_id,
+                        &account_id,
                         &account.keychain_ref,
                     )
                     .await;

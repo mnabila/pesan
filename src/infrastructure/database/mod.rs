@@ -18,7 +18,7 @@ pub type Db = SqlitePool;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS accounts (
-  id            INTEGER PRIMARY KEY,
+  id            TEXT PRIMARY KEY,
   name          TEXT NOT NULL UNIQUE,
   email         TEXT NOT NULL,
   provider      TEXT NOT NULL,
@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS accounts (
 /// `messages`, kept in sync by triggers, so cache writes stay simple upserts.
 const SCHEMA_V2: &str = r#"
 CREATE TABLE IF NOT EXISTS folders (
-  account_id INTEGER NOT NULL,
+  account_id TEXT NOT NULL,
   name       TEXT NOT NULL,
   total      INTEGER NOT NULL DEFAULT 0,
   unread     INTEGER NOT NULL DEFAULT 0,
@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS folders (
 );
 
 CREATE TABLE IF NOT EXISTS messages (
-  account_id     INTEGER NOT NULL,
+  account_id     TEXT NOT NULL,
   folder         TEXT NOT NULL,
   uid            INTEGER NOT NULL,
   seen           INTEGER NOT NULL DEFAULT 0,
@@ -82,7 +82,7 @@ CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
 END;
 
 CREATE TABLE IF NOT EXISTS sync_state (
-  account_id   INTEGER NOT NULL,
+  account_id   TEXT NOT NULL,
   folder       TEXT NOT NULL,
   uid_validity INTEGER,
   last_uid     INTEGER,
@@ -113,6 +113,132 @@ ALTER TABLE messages ADD COLUMN raw_headers TEXT;
 /// rows cached before this migration, which keep rendering from `body`.
 const SCHEMA_V5: &str = r#"
 ALTER TABLE messages ADD COLUMN raw_html TEXT;
+"#;
+
+/// Message content of record moved to the interoperable Maildir file store; the
+/// `messages` table is now just the fast index. Clear the now-unused raw HTML and
+/// raw header blobs (they are re-derived from the Maildir file on open) to
+/// reclaim space. The columns are left in place - dropping a column desyncs the
+/// external-content FTS rowids - but stay NULL from here on.
+const SCHEMA_V6: &str = r#"
+UPDATE messages SET raw_html = NULL, raw_headers = NULL;
+"#;
+
+/// Body content lives entirely in the Maildir file now; the SQLite index keeps
+/// only the envelope (sender/subject/flags). Rebuild the FTS index over just
+/// subject + sender (dropping the `body` column) and clear the stored plain-text
+/// bodies. Full-text search therefore matches sender/subject, not message text.
+const SCHEMA_V7: &str = r#"
+DROP TRIGGER IF EXISTS messages_ai;
+DROP TRIGGER IF EXISTS messages_ad;
+DROP TRIGGER IF EXISTS messages_au;
+DROP TABLE IF EXISTS messages_fts;
+
+CREATE VIRTUAL TABLE messages_fts USING fts5(
+  subject, from_name, from_email,
+  content='messages', content_rowid='rowid'
+);
+
+CREATE TRIGGER messages_ai AFTER INSERT ON messages BEGIN
+  INSERT INTO messages_fts(rowid, subject, from_name, from_email)
+  VALUES (new.rowid, new.subject, new.from_name, new.from_email);
+END;
+CREATE TRIGGER messages_ad AFTER DELETE ON messages BEGIN
+  INSERT INTO messages_fts(messages_fts, rowid, subject, from_name, from_email)
+  VALUES ('delete', old.rowid, old.subject, old.from_name, old.from_email);
+END;
+CREATE TRIGGER messages_au AFTER UPDATE ON messages BEGIN
+  INSERT INTO messages_fts(messages_fts, rowid, subject, from_name, from_email)
+  VALUES ('delete', old.rowid, old.subject, old.from_name, old.from_email);
+  INSERT INTO messages_fts(rowid, subject, from_name, from_email)
+  VALUES (new.rowid, new.subject, new.from_name, new.from_email);
+END;
+
+INSERT INTO messages_fts(messages_fts) VALUES('rebuild');
+UPDATE messages SET body = NULL;
+"#;
+
+/// The account identifier is now a UUID (TEXT), not the SQLite rowid, so the
+/// on-disk Maildir tree is keyed by a stable id that survives a DB rebuild.
+/// Existing cached data is disposable, so this drops and recreates every
+/// account-keyed table with TEXT `id`/`account_id` columns. `secrets` is keyed by
+/// `keychain_ref` (not account id), so it is left untouched.
+const SCHEMA_V8: &str = r#"
+DROP TRIGGER IF EXISTS messages_ai;
+DROP TRIGGER IF EXISTS messages_ad;
+DROP TRIGGER IF EXISTS messages_au;
+DROP TABLE IF EXISTS messages_fts;
+DROP TABLE IF EXISTS messages;
+DROP TABLE IF EXISTS folders;
+DROP TABLE IF EXISTS sync_state;
+DROP TABLE IF EXISTS accounts;
+
+CREATE TABLE accounts (
+  id            TEXT PRIMARY KEY,
+  name          TEXT NOT NULL UNIQUE,
+  email         TEXT NOT NULL,
+  provider      TEXT NOT NULL,
+  keychain_ref  TEXT NOT NULL,
+  is_default    INTEGER NOT NULL DEFAULT 0,
+  created_at    INTEGER NOT NULL
+);
+
+CREATE TABLE folders (
+  account_id TEXT NOT NULL,
+  name       TEXT NOT NULL,
+  total      INTEGER NOT NULL DEFAULT 0,
+  unread     INTEGER NOT NULL DEFAULT 0,
+  category   TEXT NOT NULL DEFAULT 'mailbox',
+  position   INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (account_id, name)
+);
+
+CREATE TABLE messages (
+  account_id     TEXT NOT NULL,
+  folder         TEXT NOT NULL,
+  uid            INTEGER NOT NULL,
+  seen           INTEGER NOT NULL DEFAULT 0,
+  flagged        INTEGER NOT NULL DEFAULT 0,
+  from_name      TEXT,
+  from_email     TEXT NOT NULL DEFAULT '',
+  subject        TEXT NOT NULL DEFAULT '',
+  date           INTEGER NOT NULL DEFAULT 0,
+  has_attachment INTEGER NOT NULL DEFAULT 0,
+  message_id     TEXT,
+  snippet        TEXT,
+  body           TEXT,
+  PRIMARY KEY (account_id, folder, uid)
+);
+CREATE INDEX messages_by_date ON messages (account_id, folder, date DESC);
+
+CREATE VIRTUAL TABLE messages_fts USING fts5(
+  subject, from_name, from_email,
+  content='messages', content_rowid='rowid'
+);
+
+CREATE TRIGGER messages_ai AFTER INSERT ON messages BEGIN
+  INSERT INTO messages_fts(rowid, subject, from_name, from_email)
+  VALUES (new.rowid, new.subject, new.from_name, new.from_email);
+END;
+CREATE TRIGGER messages_ad AFTER DELETE ON messages BEGIN
+  INSERT INTO messages_fts(messages_fts, rowid, subject, from_name, from_email)
+  VALUES ('delete', old.rowid, old.subject, old.from_name, old.from_email);
+END;
+CREATE TRIGGER messages_au AFTER UPDATE ON messages BEGIN
+  INSERT INTO messages_fts(messages_fts, rowid, subject, from_name, from_email)
+  VALUES ('delete', old.rowid, old.subject, old.from_name, old.from_email);
+  INSERT INTO messages_fts(rowid, subject, from_name, from_email)
+  VALUES (new.rowid, new.subject, new.from_name, new.from_email);
+END;
+
+CREATE TABLE sync_state (
+  account_id   TEXT NOT NULL,
+  folder       TEXT NOT NULL,
+  uid_validity INTEGER,
+  last_uid     INTEGER,
+  updated_at   INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (account_id, folder)
+);
 "#;
 
 /// Open (creating if needed) the per-user database at `path` and run migrations.
@@ -213,6 +339,39 @@ async fn migrate(pool: &Db) -> Result<()> {
             .context("set user_version")?;
         tracing::info!("db migrated to version 5 (cached raw HTML)");
     }
+    if version < 6 {
+        sqlx::raw_sql(SCHEMA_V6)
+            .execute(pool)
+            .await
+            .context("migrate db to v6")?;
+        sqlx::raw_sql("PRAGMA user_version = 6;")
+            .execute(pool)
+            .await
+            .context("set user_version")?;
+        tracing::info!("db migrated to version 6 (maildir body store)");
+    }
+    if version < 7 {
+        sqlx::raw_sql(SCHEMA_V7)
+            .execute(pool)
+            .await
+            .context("migrate db to v7")?;
+        sqlx::raw_sql("PRAGMA user_version = 7;")
+            .execute(pool)
+            .await
+            .context("set user_version")?;
+        tracing::info!("db migrated to version 7 (index sender+subject only)");
+    }
+    if version < 8 {
+        sqlx::raw_sql(SCHEMA_V8)
+            .execute(pool)
+            .await
+            .context("migrate db to v8")?;
+        sqlx::raw_sql("PRAGMA user_version = 8;")
+            .execute(pool)
+            .await
+            .context("set user_version")?;
+        tracing::info!("db migrated to version 8 (uuid account ids)");
+    }
     Ok(())
 }
 
@@ -227,7 +386,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, 8);
     }
 
     #[tokio::test]
@@ -236,7 +395,7 @@ mod tests {
         let pool = open(Path::new(":memory:")).await.unwrap();
         sqlx::query(
             "INSERT INTO messages (account_id, folder, uid, from_email, subject, body) \
-             VALUES (1, 'INBOX', 1, 'a@b.io', 'Roadmap review', 'lets discuss the roadmap')",
+             VALUES ('a1', 'INBOX', 1, 'a@b.io', 'Roadmap review', 'lets discuss the roadmap')",
         )
         .execute(&pool)
         .await

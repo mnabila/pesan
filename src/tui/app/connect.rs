@@ -172,7 +172,7 @@ impl App {
         // still works during the reconnect window, then reconnect the account.
         self.idle_watchers.remove(&account);
         self.live = false;
-        self.source = offline_source(&self.services, self.active_account_id()).await;
+        self.source = offline_source(&self.services, self.active_account_id().as_deref()).await;
         self.set_toast(
             format!("Connection lost - reconnecting {account}..."),
             ToastKind::Warning,
@@ -247,7 +247,7 @@ impl App {
         // Arrival watchers are per-account and persist across switches, so the
         // focused account keeps being watched independently of this cached view.
         self.live = false;
-        self.source = offline_source(&self.services, self.active_account_id()).await;
+        self.source = offline_source(&self.services, self.active_account_id().as_deref()).await;
         let folders = self.source.list_folders().await.unwrap_or_default();
         self.set_folders(folders).await;
         self.apply_cached_counts().await;
@@ -276,7 +276,7 @@ impl App {
         let counts = self
             .services
             .cache
-            .count_by_folder(id)
+            .count_by_folder(&id)
             .await
             .unwrap_or_default();
         let by_name: std::collections::HashMap<String, (usize, usize)> =
@@ -358,7 +358,7 @@ impl App {
             }
         }
         if let Some(id) = self.active_account_id() {
-            let _ = self.services.cache.upsert_folders(id, &self.folders).await;
+            let _ = self.services.cache.upsert_folders(&id, &self.folders).await;
         }
     }
 
@@ -458,7 +458,7 @@ impl App {
         let mut ctx = self.task_ctx();
         if let Some(a) = self.accounts.get(idx) {
             ctx.account = a.name.clone();
-            ctx.account_id = a.id;
+            ctx.account_id = a.id.clone();
         }
         if ctx.event_tx.is_none() {
             return;

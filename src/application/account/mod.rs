@@ -4,7 +4,7 @@ use sqlx::FromRow;
 /// and a keychain entry (`keychain_ref`) holding the OAuth refresh token.
 #[derive(Debug, Clone, PartialEq, Eq, FromRow)]
 pub struct Account {
-    pub id: Option<i64>,
+    pub id: Option<String>,
     pub name: String,
     pub email: String,
     pub provider: String,

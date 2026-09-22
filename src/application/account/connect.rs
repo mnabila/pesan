@@ -126,7 +126,10 @@ async fn ensure_access_token(
 
 /// Build an offline source for instant display before/without a live
 /// connection. See [`MailBackend::offline_source`].
-pub(crate) async fn offline_source(svc: &Services, account_id: Option<i64>) -> Box<dyn MailSource> {
+pub(crate) async fn offline_source(
+    svc: &Services,
+    account_id: Option<&str>,
+) -> Box<dyn MailSource> {
     svc.backend.offline_source(account_id).await
 }
 
@@ -137,7 +140,7 @@ pub(crate) async fn offline_source(svc: &Services, account_id: Option<i64>) -> B
 pub(crate) async fn connect_account(
     svc: &Services,
     mut params: ConnectParams,
-    account_id: Option<i64>,
+    account_id: Option<String>,
     want_folder: String,
     sync_all_folders: bool,
     on_lost: Option<UnboundedSender<String>>,
@@ -182,7 +185,7 @@ pub(crate) async fn connect_account(
         .list_folders()
         .await
         .map_err(|e| classify("list folders", e))?;
-    if let Some(id) = account_id {
+    if let Some(id) = &account_id {
         let _ = svc.cache.upsert_folders(id, &folders).await;
     }
 
@@ -195,7 +198,7 @@ pub(crate) async fn connect_account(
         .unwrap_or_else(|| "INBOX".to_string());
 
     let envelopes = source.list_messages(&folder).await.unwrap_or_default();
-    if let Some(id) = account_id {
+    if let Some(id) = &account_id {
         let _ = svc.cache.upsert_envelopes(id, &folder, &envelopes).await;
     }
 
@@ -204,7 +207,7 @@ pub(crate) async fn connect_account(
     // done when the caller asks (the discarded background connect), since the
     // active account fills its remaining folders after connect via a retained
     // handle (`spawn_folder_sync_all`).
-    if sync_all_folders && let Some(id) = account_id {
+    if sync_all_folders && let Some(id) = &account_id {
         for f in &folders {
             if f.name == folder {
                 continue;

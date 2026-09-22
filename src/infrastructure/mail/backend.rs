@@ -7,14 +7,16 @@ use crate::application::mail::fetch::MailSource;
 use crate::application::oauth::{ResolvedOAuth, TokenSet};
 use crate::application::ports::MailBackend;
 use crate::infrastructure::database::Db;
+use crate::infrastructure::mail::maildir::MaildirStore;
 
 pub struct ImapBackend {
     pool: Db,
+    maildir: MaildirStore,
 }
 
 impl ImapBackend {
-    pub fn new(pool: Db) -> Self {
-        Self { pool }
+    pub fn new(pool: Db, maildir: MaildirStore) -> Self {
+        Self { pool, maildir }
     }
 }
 
@@ -55,7 +57,7 @@ impl MailBackend for ImapBackend {
         Ok(Box::new(src))
     }
 
-    async fn offline_source(&self, account_id: Option<i64>) -> Box<dyn MailSource> {
+    async fn offline_source(&self, account_id: Option<&str>) -> Box<dyn MailSource> {
         if let Some(id) = account_id
             && crate::infrastructure::database::cache::has_messages(&self.pool, id)
                 .await
@@ -63,7 +65,8 @@ impl MailBackend for ImapBackend {
         {
             return Box::new(crate::infrastructure::mail::cache::CacheSource::new(
                 self.pool.clone(),
-                id,
+                self.maildir.clone(),
+                id.to_string(),
             ));
         }
         Box::new(crate::infrastructure::mail::empty::EmptySource::new())

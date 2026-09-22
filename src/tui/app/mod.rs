@@ -311,8 +311,8 @@ impl App {
 
         // Offline-first: show cached mail immediately if the default account has
         // any; otherwise nothing until the live connect lands.
-        let account_id = accounts.get(active).and_then(|a| a.id);
-        let source = offline_source(&services, account_id).await;
+        let account_id = accounts.get(active).and_then(|a| a.id.clone());
+        let source = offline_source(&services, account_id.as_deref()).await;
         let folders = source.list_folders().await.unwrap_or_default();
         let folder_collapsed = vec![false; folders.len()];
         let current_folder = folders
@@ -565,8 +565,10 @@ impl App {
         self.event_tx = Some(tx);
     }
 
-    fn active_account_id(&self) -> Option<i64> {
-        self.accounts.get(self.active_account).and_then(|a| a.id)
+    fn active_account_id(&self) -> Option<String> {
+        self.accounts
+            .get(self.active_account)
+            .and_then(|a| a.id.clone())
     }
 }
 

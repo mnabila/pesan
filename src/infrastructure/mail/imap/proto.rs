@@ -178,6 +178,7 @@ pub(crate) async fn fetch_message(session: &mut ImapSession, uid: u64) -> Result
         body: text,
         raw_html,
         raw_headers,
+        raw: Some(raw.to_vec()),
     })
 }
 

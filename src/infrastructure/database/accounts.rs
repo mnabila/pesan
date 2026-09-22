@@ -13,7 +13,7 @@ pub async fn list(db: &Db) -> Result<Vec<Account>> {
 }
 
 #[allow(dead_code)] // test-only
-pub async fn get(db: &Db, id: i64) -> Result<Option<Account>> {
+pub async fn get(db: &Db, id: &str) -> Result<Option<Account>> {
     let sql = format!("SELECT {COLS} FROM accounts WHERE id = ?");
     let account = sqlx::query_as::<_, Account>(&sql)
         .bind(id)
@@ -32,9 +32,9 @@ pub async fn get_by_name(db: &Db, name: &str) -> Result<Option<Account>> {
 }
 
 /// Insert a new account, or update an existing one (by id if set, else by name).
-/// Returns the row id of the saved account. First account becomes the default.
-pub async fn upsert(db: &Db, account: &Account) -> Result<i64> {
-    if let Some(id) = account.id {
+/// Returns the UUID of the saved account. First account becomes the default.
+pub async fn upsert(db: &Db, account: &Account) -> Result<String> {
+    if let Some(id) = &account.id {
         sqlx::query(
             "UPDATE accounts SET name = ?, email = ?, provider = ?, \
              keychain_ref = ?, is_default = ? WHERE id = ?",
@@ -47,7 +47,7 @@ pub async fn upsert(db: &Db, account: &Account) -> Result<i64> {
         .bind(id)
         .execute(db)
         .await?;
-        return Ok(id);
+        return Ok(id.clone());
     }
 
     if let Some(existing) = get_by_name(db, &account.name).await? {
@@ -60,17 +60,21 @@ pub async fn upsert(db: &Db, account: &Account) -> Result<i64> {
         .bind(&account.provider)
         .bind(&account.keychain_ref)
         .bind(account.is_default)
-        .bind(id)
+        .bind(&id)
         .execute(db)
         .await?;
         return Ok(id);
     }
 
     let now = account.created_at.max(0);
-    let res = sqlx::query(
-        "INSERT INTO accounts (name, email, provider, keychain_ref, is_default, created_at) \
-         VALUES (?, ?, ?, ?, ?, ?)",
+    // A fresh UUID is the account's stable identity (and its Maildir directory
+    // name), independent of insertion order or any DB rebuild.
+    let id = uuid::Uuid::new_v4().to_string();
+    sqlx::query(
+        "INSERT INTO accounts (id, name, email, provider, keychain_ref, is_default, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
     )
+    .bind(&id)
     .bind(&account.name)
     .bind(&account.email)
     .bind(&account.provider)
@@ -79,16 +83,15 @@ pub async fn upsert(db: &Db, account: &Account) -> Result<i64> {
     .bind(now)
     .execute(db)
     .await?;
-    let id = res.last_insert_rowid();
 
     // First account becomes the default so there is always one active.
     if list(db).await?.len() == 1 {
-        set_default(db, id).await?;
+        set_default(db, &id).await?;
     }
     Ok(id)
 }
 
-pub async fn delete(db: &Db, id: i64) -> Result<()> {
+pub async fn delete(db: &Db, id: &str) -> Result<()> {
     sqlx::query("DELETE FROM accounts WHERE id = ?")
         .bind(id)
         .execute(db)
@@ -97,7 +100,7 @@ pub async fn delete(db: &Db, id: i64) -> Result<()> {
 }
 
 /// Promote one account to default, clearing the flag on all others.
-pub async fn set_default(db: &Db, id: i64) -> Result<()> {
+pub async fn set_default(db: &Db, id: &str) -> Result<()> {
     let mut tx = db.begin().await?;
     sqlx::query("UPDATE accounts SET is_default = 0")
         .execute(&mut *tx)
@@ -131,7 +134,7 @@ impl AccountRepo for SqliteAccountRepo {
         list(&self.db).await
     }
 
-    async fn get(&self, id: i64) -> Result<Option<Account>> {
+    async fn get(&self, id: &str) -> Result<Option<Account>> {
         get(&self.db, id).await
     }
 
@@ -139,15 +142,15 @@ impl AccountRepo for SqliteAccountRepo {
         get_by_name(&self.db, name).await
     }
 
-    async fn upsert(&self, account: &Account) -> Result<i64> {
+    async fn upsert(&self, account: &Account) -> Result<String> {
         upsert(&self.db, account).await
     }
 
-    async fn delete(&self, id: i64) -> Result<()> {
+    async fn delete(&self, id: &str) -> Result<()> {
         delete(&self.db, id).await
     }
 
-    async fn set_default(&self, id: i64) -> Result<()> {
+    async fn set_default(&self, id: &str) -> Result<()> {
         set_default(&self.db, id).await
     }
 }
@@ -177,7 +180,7 @@ mod tests {
     async fn first_account_becomes_default() {
         let db = connect().await;
         let id = upsert(&db, &account("personal")).await.unwrap();
-        let got = get(&db, id).await.unwrap().unwrap();
+        let got = get(&db, &id).await.unwrap().unwrap();
         assert!(got.is_default);
         assert_eq!(list(&db).await.unwrap().len(), 1);
     }
@@ -190,7 +193,7 @@ mod tests {
         next.email = "changed@example.com".to_string();
         let id2 = upsert(&db, &next).await.unwrap();
         assert_eq!(id, id2);
-        let got = get(&db, id).await.unwrap().unwrap();
+        let got = get(&db, &id).await.unwrap().unwrap();
         assert_eq!(got.email, "changed@example.com");
         assert_eq!(list(&db).await.unwrap().len(), 1);
     }
@@ -200,10 +203,10 @@ mod tests {
         let db = connect().await;
         let a = upsert(&db, &account("one")).await.unwrap();
         let b = upsert(&db, &account("two")).await.unwrap();
-        set_default(&db, b).await.unwrap();
+        set_default(&db, &b).await.unwrap();
         let (o, t, w) = (
-            get(&db, a).await.unwrap().unwrap(),
-            get(&db, b).await.unwrap().unwrap(),
+            get(&db, &a).await.unwrap().unwrap(),
+            get(&db, &b).await.unwrap().unwrap(),
             list(&db).await.unwrap(),
         );
         assert!(!o.is_default);
@@ -215,8 +218,8 @@ mod tests {
     async fn delete_removes_row() {
         let db = connect().await;
         let id = upsert(&db, &account("personal")).await.unwrap();
-        delete(&db, id).await.unwrap();
-        assert!(get(&db, id).await.unwrap().is_none());
+        delete(&db, &id).await.unwrap();
+        assert!(get(&db, &id).await.unwrap().is_none());
         assert!(list(&db).await.unwrap().is_empty());
     }
 }

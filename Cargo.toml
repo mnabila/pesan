@@ -22,6 +22,7 @@ strip = true          # strip symbols
 
 [dependencies]
 anyhow = "1.0.104"
+uuid = { version = "1", features = ["v4"] }
 async-imap = { version = "0.11.3", default-features = false, features = [
   "runtime-tokio",
 ] }

@@ -30,7 +30,7 @@ use crate::shared::is_today;
 
 /// A new-mail batch tagged with the account + folder it arrived on, so the loop
 /// can file it under the right cache key (the domain `NewMail` carries neither).
-type Arrival = (i64, String, NewMail);
+type Arrival = (String, String, NewMail);
 
 /// Broadcast capacity for arrival pushes to subscribed clients. Small; clients
 /// that lag just miss a push and re-sync from the cache.
@@ -113,7 +113,7 @@ fn start_ipc_server(req_tx: mpsc::UnboundedSender<HubMsg>, pushes: broadcast::Se
 /// accounts connect concurrently while the owner stays the single mutator of the
 /// session maps.
 struct ConnectOutcome {
-    id: i64,
+    id: String,
     name: String,
     result: Result<ConnectSpoils, String>,
 }
@@ -142,13 +142,14 @@ async fn owner_task(
 
     let (arrivals_tx, mut arrivals_rx) = mpsc::unbounded_channel::<Arrival>();
     let (done_tx, mut done_rx) = mpsc::unbounded_channel::<ConnectOutcome>();
-    let mut sources: HashMap<i64, Box<dyn MailSource>> = HashMap::new();
-    let mut names: HashMap<i64, String> = HashMap::new();
+    let mut sources: HashMap<String, Box<dyn MailSource>> = HashMap::new();
+    let mut names: HashMap<String, String> = HashMap::new();
     let mut watch_handles: Vec<Box<dyn crate::application::ports::WatchHandle>> = Vec::new();
     // Accounts with a connect task in flight, and the handle requests waiting on
     // each - so N clients asking for the same account share one connect.
-    let mut connecting: std::collections::HashSet<i64> = std::collections::HashSet::new();
-    let mut waiters: HashMap<i64, Vec<oneshot::Sender<Result<ImapHandle, String>>>> = HashMap::new();
+    let mut connecting: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut waiters: HashMap<String, Vec<oneshot::Sender<Result<ImapHandle, String>>>> =
+        HashMap::new();
 
     // Periodic folder re-sync (optional): re-list watched folders to catch
     // server-side changes IDLE doesn't report, pushing refreshed lists to clients.
@@ -168,8 +169,8 @@ async fn owner_task(
         .collect();
     tracing::info!("daemon: connecting {} account(s) in parallel", want.len());
     for account in want {
-        let id = account.id.expect("filtered to Some");
-        if connecting.insert(id) {
+        let id = account.id.clone().expect("filtered to Some");
+        if connecting.insert(id.clone()) {
             spawn_connect(&config, &services, &folders, cap, poll, account, id, &arrivals_tx, &done_tx);
         }
     }
@@ -182,7 +183,7 @@ async fn owner_task(
                     let hit = database::accounts::get_by_name(&pool, &account).await;
                     match hit {
                         Ok(Some(acct)) => {
-                            let Some(id) = acct.id else {
+                            let Some(id) = acct.id.clone() else {
                                 let _ = reply.send(Err("account has no id".to_string()));
                                 continue;
                             };
@@ -191,8 +192,8 @@ async fn owner_task(
                                 continue;
                             }
                             // Otherwise queue on the in-flight (or new) connect.
-                            waiters.entry(id).or_default().push(reply);
-                            if connecting.insert(id) {
+                            waiters.entry(id.clone()).or_default().push(reply);
+                            if connecting.insert(id.clone()) {
                                 spawn_connect(
                                     &config, &services, &folders, cap, poll, acct, id,
                                     &arrivals_tx, &done_tx,
@@ -209,9 +210,9 @@ async fn owner_task(
                 connecting.remove(&id);
                 match result {
                     Ok(spoils) => {
-                        names.insert(id, name);
+                        names.insert(id.clone(), name);
                         watch_handles.extend(spoils.watchers);
-                        sources.insert(id, spoils.source);
+                        sources.insert(id.clone(), spoils.source);
                         for w in waiters.remove(&id).unwrap_or_default() {
                             let h = spoils
                                 .handle
@@ -238,10 +239,10 @@ async fn owner_task(
                 );
                 // File the arrivals into the cache (preserves any cached body),
                 // then prefetch their bodies so a later open is instant.
-                let _ = services.cache.upsert_envelopes(id, &folder, &mail.envelopes).await;
+                let _ = services.cache.upsert_envelopes(&id, &folder, &mail.envelopes).await;
                 if let Some(handle) = sources.get(&id).and_then(|s| s.imap_handle()) {
                     let uids: Vec<u64> = mail.envelopes.iter().take(cap).map(|e| e.uid).collect();
-                    prefetch_bodies(&services, &handle, id, &folder, uids).await;
+                    prefetch_bodies(&services, &handle, &id, &folder, uids).await;
                 }
                 notify(&config, &services, &mail.account, &mail.envelopes);
                 // Push to any subscribed clients (ignore error: no subscribers).
@@ -257,13 +258,13 @@ async fn owner_task(
                 Some(iv) => { iv.tick().await; }
                 None => std::future::pending::<()>().await,
             } } => {
-                for (&id, src) in sources.iter() {
-                    let (Some(handle), Some(name)) = (src.imap_handle(), names.get(&id).cloned())
+                for (id, src) in sources.iter() {
+                    let (Some(handle), Some(name)) = (src.imap_handle(), names.get(id).cloned())
                     else { continue };
                     for folder in &folders {
                         tokio::spawn(resync_folder(
                             services.clone(), handle.clone(), pushes.clone(),
-                            id, name.clone(), folder.clone(),
+                            id.clone(), name.clone(), folder.clone(),
                         ));
                     }
                 }
@@ -274,10 +275,10 @@ async fn owner_task(
                     .into_iter()
                     .filter(|a| a.id.is_some() && config.daemon.includes(&a.name))
                 {
-                    let id = account.id.expect("filtered to Some");
+                    let id = account.id.clone().expect("filtered to Some");
                     // Skip already-connected or in-flight accounts; `connecting`
                     // guards against a double connect with the eager startup.
-                    if !sources.contains_key(&id) && connecting.insert(id) {
+                    if !sources.contains_key(&id) && connecting.insert(id.clone()) {
                         tracing::info!("daemon: retrying connect for account '{}'", account.name);
                         spawn_connect(
                             &config, &services, &folders, cap, poll, account, id,
@@ -301,7 +302,7 @@ fn spawn_connect(
     cap: usize,
     poll: std::time::Duration,
     account: Account,
-    id: i64,
+    id: String,
     arrivals_tx: &mpsc::UnboundedSender<Arrival>,
     done_tx: &mpsc::UnboundedSender<ConnectOutcome>,
 ) {
@@ -311,7 +312,7 @@ fn spawn_connect(
     tokio::spawn(async move {
         let name = account.name.clone();
         let result =
-            do_connect(&config, &services, &folders, cap, poll, &account, id, &arrivals_tx).await;
+            do_connect(&config, &services, &folders, cap, poll, &account, &id, &arrivals_tx).await;
         let _ = done_tx.send(ConnectOutcome { id, name, result });
     });
 }
@@ -327,7 +328,7 @@ async fn do_connect(
     cap: usize,
     poll: std::time::Duration,
     account: &Account,
-    id: i64,
+    id: &str,
     arrivals_tx: &mpsc::UnboundedSender<Arrival>,
 ) -> Result<ConnectSpoils, String> {
     let params = match resolve_connect_params(config, account, services.tokens.as_ref()).await {
@@ -337,7 +338,7 @@ async fn do_connect(
     };
     let want = folders.first().cloned().unwrap_or_else(|| "INBOX".to_string());
     // sync_all=false: return a usable handle fast; other folders warm on demand.
-    let live = connect_account(services, params.clone(), Some(id), want, false, None)
+    let live = connect_account(services, params.clone(), Some(id.to_string()), want, false, None)
         .await
         .map_err(|e| format!("connect '{}' failed: {e}", account.name))?;
     tracing::info!("daemon: connected '{}' ({} folders)", account.name, live.folders.len());
@@ -356,13 +357,13 @@ async fn do_connect(
     for folder in folders {
         let (w_tx, mut w_rx) = mpsc::unbounded_channel::<MailUpdate>();
         let tagged = arrivals_tx.clone();
-        let (aid, f) = (id, folder.clone());
+        let (aid, f) = (id.to_string(), folder.clone());
         tokio::spawn(async move {
             while let Some(update) = w_rx.recv().await {
                 // The daemon's own watcher is IMAP IDLE - arrivals only. Folder
                 // re-syncs are produced by the daemon's periodic pass, not here.
                 if let MailUpdate::Arrived(nm) = update
-                    && tagged.send((aid, f.clone(), nm)).is_err()
+                    && tagged.send((aid.clone(), f.clone(), nm)).is_err()
                 {
                     break;
                 }
@@ -385,7 +386,7 @@ async fn resync_folder(
     services: Services,
     handle: ImapHandle,
     pushes: broadcast::Sender<PushEvent>,
-    account_id: i64,
+    account_id: String,
     account: String,
     folder: String,
 ) {
@@ -398,13 +399,13 @@ async fn resync_folder(
     };
     let cached = services
         .cache
-        .load_envelopes(account_id, &folder)
+        .load_envelopes(&account_id, &folder)
         .await
         .unwrap_or_default();
     if !window_changed(&cached, &fresh) {
         return; // nothing new/changed - don't spam clients
     }
-    let _ = services.cache.upsert_envelopes(account_id, &folder, &fresh).await;
+    let _ = services.cache.upsert_envelopes(&account_id, &folder, &fresh).await;
     tracing::info!("daemon: resync {account}/{folder} changed ({} msgs); pushed", fresh.len());
     let _ = pushes.send(PushEvent::FolderSync { account, folder, envelopes: fresh });
 }
@@ -473,7 +474,7 @@ fn today_uids(envelopes: &[Envelope], cap: usize) -> Vec<u64> {
 async fn prefetch_bodies(
     services: &crate::application::Services,
     handle: &ImapHandle,
-    account_id: i64,
+    account_id: &str,
     folder: &str,
     uids: Vec<u64>,
 ) {
@@ -488,14 +489,7 @@ async fn prefetch_bodies(
             Ok(msg) => {
                 let _ = services
                     .cache
-                    .store_body(
-                        account_id,
-                        folder,
-                        uid,
-                        &msg.body,
-                        msg.raw_html.as_deref(),
-                        msg.raw_headers.as_deref(),
-                    )
+                    .store_body(account_id, folder, uid, msg.raw.as_deref())
                     .await;
             }
             Err(e) => tracing::debug!("daemon: prefetch {folder}/{uid} failed: {e}"),

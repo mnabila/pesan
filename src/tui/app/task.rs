@@ -29,7 +29,7 @@ pub(crate) struct TaskCtx {
     pub services: Services,
     pub event_tx: Option<UnboundedSender<Event>>,
     pub account: String,
-    pub account_id: Option<i64>,
+    pub account_id: Option<String>,
 }
 
 impl TaskCtx {
@@ -67,7 +67,7 @@ impl TaskCtx {
                             return;
                         }
                     };
-                    if let Some(id) = ctx.account_id {
+                    if let Some(id) = &ctx.account_id {
                         let _ = ctx
                             .services
                             .cache
@@ -91,18 +91,11 @@ impl TaskCtx {
                     let message = match handle.fetch_message(&folder, uid).await {
                         Ok(mut msg) => {
                             msg.envelope.flags = flags;
-                            if let Some(id) = ctx.account_id {
+                            if let Some(id) = &ctx.account_id {
                                 let _ = ctx
                                     .services
                                     .cache
-                                    .store_body(
-                                        id,
-                                        &folder,
-                                        uid,
-                                        &msg.body,
-                                        msg.raw_html.as_deref(),
-                                        msg.raw_headers.as_deref(),
-                                    )
+                                    .store_body(id, &folder, uid, msg.raw.as_deref())
                                     .await;
                             }
                             msg
@@ -117,6 +110,7 @@ impl TaskCtx {
                             ),
                             raw_html: None,
                             raw_headers: None,
+                            raw: None,
                         },
                     };
                     let _ = tx.send(Event::MessageFetched(Box::new(
@@ -132,7 +126,7 @@ impl TaskCtx {
                     let Some(handle) = ctx.handle else {
                         return;
                     };
-                    let Some(id) = ctx.account_id else {
+                    let Some(id) = &ctx.account_id else {
                         return;
                     };
                     for uid in uids {
@@ -150,14 +144,7 @@ impl TaskCtx {
                             let _ = ctx
                                 .services
                                 .cache
-                                .store_body(
-                                    id,
-                                    &folder,
-                                    uid,
-                                    &msg.body,
-                                    msg.raw_html.as_deref(),
-                                    msg.raw_headers.as_deref(),
-                                )
+                                .store_body(id, &folder, uid, msg.raw.as_deref())
                                 .await;
                         }
                     }
@@ -208,7 +195,7 @@ impl TaskCtx {
                             envelopes: Vec::new(),
                             total: 0,
                         });
-                    if let Some(id) = ctx.account_id
+                    if let Some(id) = &ctx.account_id
                         && !window.envelopes.is_empty()
                     {
                         let _ = ctx
@@ -253,7 +240,7 @@ impl TaskCtx {
                     let result = crate::application::account::connect::connect_account(
                         &ctx.services,
                         params,
-                        ctx.account_id,
+                        ctx.account_id.clone(),
                         want_folder,
                         sync_all_folders,
                         on_lost,
@@ -282,7 +269,7 @@ impl TaskCtx {
                         // the shared connection so the reader never waits behind
                         // this sweep.
                         if let Ok(envs) = handle.list_messages_bg(&name).await
-                            && let Some(id) = ctx.account_id
+                            && let Some(id) = &ctx.account_id
                         {
                             let _ = ctx.services.cache.upsert_envelopes(id, &name, &envs).await;
                         }
@@ -315,7 +302,7 @@ impl TaskCtx {
             services: self.services.clone(),
             event_tx: self.event_tx.clone(),
             account: self.account.clone(),
-            account_id: self.account_id,
+            account_id: self.account_id.clone(),
         }
     }
 }

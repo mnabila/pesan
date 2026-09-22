@@ -27,6 +27,7 @@ use crate::application::ports::{MailBackend, NewMailWatch, WatchHandle};
 use crate::domain::{Draft, Folder, MailUpdate, NewMail};
 use crate::infrastructure::database::Db;
 use crate::infrastructure::mail::backend::ImapBackend;
+use crate::infrastructure::mail::maildir::MaildirStore;
 
 /// True if the daemon socket accepts a connection right now. A cheap synchronous
 /// probe, used where the decision must be made without `await` (watcher setup,
@@ -45,8 +46,8 @@ pub struct IpcBackend {
 }
 
 impl IpcBackend {
-    pub fn new(pool: Db, sock: PathBuf) -> Self {
-        Self { inner: ImapBackend::new(pool), sock }
+    pub fn new(pool: Db, maildir: MaildirStore, sock: PathBuf) -> Self {
+        Self { inner: ImapBackend::new(pool, maildir), sock }
     }
 }
 
@@ -77,7 +78,7 @@ impl MailBackend for IpcBackend {
         Ok(Box::new(src))
     }
 
-    async fn offline_source(&self, account_id: Option<i64>) -> Box<dyn MailSource> {
+    async fn offline_source(&self, account_id: Option<&str>) -> Box<dyn MailSource> {
         // Cache/empty source only - no network, so this is fine in a strict client.
         self.inner.offline_source(account_id).await
     }

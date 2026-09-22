@@ -16,10 +16,10 @@ impl App {
             .accounts
             .iter()
             .find(|a| a.name == batch.account)
-            .and_then(|a| a.id)
+            .and_then(|a| a.id.clone())
         {
             let folder = arrival_folder.clone();
-            if let Ok(cached) = self.services.cache.load_envelopes(id, &folder).await {
+            if let Ok(cached) = self.services.cache.load_envelopes(&id, &folder).await {
                 let fresh: Vec<Envelope> = batch
                     .envelopes
                     .iter()
@@ -30,7 +30,7 @@ impl App {
                     let _ = self
                         .services
                         .cache
-                        .upsert_envelopes(id, &folder, &fresh)
+                        .upsert_envelopes(&id, &folder, &fresh)
                         .await;
                 }
             }
@@ -190,7 +190,7 @@ impl App {
         };
         self.services
             .cache
-            .load_envelopes(id, folder)
+            .load_envelopes(&id, folder)
             .await
             .unwrap_or_default()
     }
@@ -385,7 +385,7 @@ impl App {
         let folder = self.selected_folder_name().to_string();
         match crate::application::mail::search::search_cache(
             &self.services,
-            self.active_account_id(),
+            self.active_account_id().as_deref(),
             &folder,
             term,
         )
@@ -419,7 +419,7 @@ impl App {
         let live = self.live && self.source.imap_handle().is_some();
         let out = crate::application::mail::open::open_message(
             &self.services,
-            self.active_account_id(),
+            self.active_account_id().as_deref(),
             &folder,
             &env,
             live,
@@ -470,14 +470,7 @@ impl App {
                     let _ = self
                         .services
                         .cache
-                        .store_body(
-                            id,
-                            &folder,
-                            uid,
-                            &msg.body,
-                            msg.raw_html.as_deref(),
-                            msg.raw_headers.as_deref(),
-                        )
+                        .store_body(&id, &folder, uid, msg.raw.as_deref())
                         .await;
                 }
                 self.set_open_message(Some(msg));
@@ -555,7 +548,7 @@ impl App {
     /// fetches are written through to the cache like other read paths.
     async fn resolve_browser_message(&self, folder: &str, env: &Envelope) -> Option<Message> {
         if let Some(id) = self.active_account_id()
-            && let Ok(Some(m)) = self.services.cache.load_message(id, folder, env.uid).await
+            && let Ok(Some(m)) = self.services.cache.load_message(&id, folder, env.uid).await
             && !m.body.is_empty()
         {
             return Some(m);
@@ -567,14 +560,7 @@ impl App {
                 let _ = self
                     .services
                     .cache
-                    .store_body(
-                        id,
-                        folder,
-                        env.uid,
-                        &m.body,
-                        m.raw_html.as_deref(),
-                        m.raw_headers.as_deref(),
-                    )
+                    .store_body(&id, folder, env.uid, m.raw.as_deref())
                     .await;
             }
             return Some(m);

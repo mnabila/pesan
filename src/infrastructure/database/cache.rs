@@ -5,6 +5,7 @@ use sqlx::sqlite::SqliteRow;
 use crate::application::ports::MailCache;
 use crate::domain::{Address, Envelope, Flags, Folder, FolderCategory, Message};
 use crate::infrastructure::database::Db;
+use crate::infrastructure::mail::maildir::MaildirStore;
 
 const ENVELOPE_COLS: &str =
     "uid, seen, flagged, from_name, from_email, subject, date, has_attachment, message_id, snippet";
@@ -37,7 +38,7 @@ fn row_to_envelope(r: &SqliteRow) -> Result<Envelope> {
 }
 
 /// Replace the cached folder list for an account (folders change wholesale).
-pub async fn upsert_folders(db: &Db, account_id: i64, folders: &[Folder]) -> Result<()> {
+pub async fn upsert_folders(db: &Db, account_id: &str, folders: &[Folder]) -> Result<()> {
     let mut tx = db.begin().await?;
     sqlx::query("DELETE FROM folders WHERE account_id = ?")
         .bind(account_id)
@@ -65,7 +66,7 @@ pub async fn upsert_folders(db: &Db, account_id: i64, folders: &[Folder]) -> Res
     Ok(())
 }
 
-pub async fn load_folders(db: &Db, account_id: i64) -> Result<Vec<Folder>> {
+pub async fn load_folders(db: &Db, account_id: &str) -> Result<Vec<Folder>> {
     let rows = sqlx::query(
         "SELECT name, total, unread, category FROM folders \
          WHERE account_id = ? ORDER BY position",
@@ -93,7 +94,7 @@ pub async fn load_folders(db: &Db, account_id: i64) -> Result<Vec<Folder>> {
 /// Upsert envelopes for a folder, preserving any already-cached `body`.
 pub async fn upsert_envelopes(
     db: &Db,
-    account_id: i64,
+    account_id: &str,
     folder: &str,
     envelopes: &[Envelope],
 ) -> Result<()> {
@@ -128,7 +129,7 @@ pub async fn upsert_envelopes(
     Ok(())
 }
 
-pub async fn load_envelopes(db: &Db, account_id: i64, folder: &str) -> Result<Vec<Envelope>> {
+pub async fn load_envelopes(db: &Db, account_id: &str, folder: &str) -> Result<Vec<Envelope>> {
     let sql = format!(
         "SELECT {ENVELOPE_COLS} FROM messages \
          WHERE account_id = ? AND folder = ? ORDER BY date DESC"
@@ -141,42 +142,58 @@ pub async fn load_envelopes(db: &Db, account_id: i64, folder: &str) -> Result<Ve
     rows.iter().map(row_to_envelope).collect()
 }
 
-/// Store a fetched body (plus the raw HTML source and raw RFC822 header block
-/// when available) for a cached message, so a later open - even offline - can
-/// render faithfully and show the full headers.
+/// Store a fetched message body: the complete `raw` RFC822 bytes go to the
+/// interoperable Maildir file, the sole home for message content. The SQLite
+/// index keeps only the envelope; nothing about the body is written to it. The
+/// file's flags mirror the cached envelope so an external tool sees the right
+/// \Seen/\Flagged state. A no-op when `raw` is `None`.
 pub async fn store_body(
     db: &Db,
-    account_id: i64,
+    maildir: &MaildirStore,
+    account_id: &str,
     folder: &str,
     uid: u64,
-    body: &str,
-    raw_html: Option<&str>,
-    raw_headers: Option<&str>,
+    raw: Option<&[u8]>,
 ) -> Result<()> {
-    sqlx::query(
-        "UPDATE messages SET body = ?, raw_html = ?, raw_headers = ? \
-         WHERE account_id = ? AND folder = ? AND uid = ?",
-    )
-    .bind(body)
-    .bind(raw_html)
-    .bind(raw_headers)
-    .bind(account_id)
-    .bind(folder)
-    .bind(uid as i64)
-    .execute(db)
-    .await?;
+    if let Some(raw) = raw {
+        let (seen, flagged) = flags_of(db, account_id, folder, uid).await;
+        maildir.write(account_id, folder, uid, seen, flagged, raw)?;
+    }
     Ok(())
 }
 
-/// Load a cached message (envelope + body). `body` is empty if not yet fetched.
+/// The cached `(seen, flagged)` flags for a message, defaulting to `(false,
+/// false)` when the row is missing.
+async fn flags_of(db: &Db, account_id: &str, folder: &str, uid: u64) -> (bool, bool) {
+    sqlx::query("SELECT seen, flagged FROM messages WHERE account_id = ? AND folder = ? AND uid = ?")
+        .bind(account_id)
+        .bind(folder)
+        .bind(uid as i64)
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|r| {
+            Some((
+                r.try_get::<i64, _>(0).ok()? != 0,
+                r.try_get::<i64, _>(1).ok()? != 0,
+            ))
+        })
+        .unwrap_or((false, false))
+}
+
+/// Load a cached message: envelope + flags from the index, and the body / HTML
+/// source / raw headers re-derived from the Maildir file when one exists. `body`
+/// is the indexed plain text (empty if never fetched) when there is no file.
 pub async fn load_message(
     db: &Db,
-    account_id: i64,
+    maildir: &MaildirStore,
+    account_id: &str,
     folder: &str,
     uid: u64,
 ) -> Result<Option<Message>> {
     let sql = format!(
-        "SELECT {ENVELOPE_COLS}, body, raw_html, raw_headers FROM messages \
+        "SELECT {ENVELOPE_COLS} FROM messages \
          WHERE account_id = ? AND folder = ? AND uid = ?"
     );
     let row = sqlx::query(&sql)
@@ -187,24 +204,34 @@ pub async fn load_message(
         .await?;
     let Some(r) = row else { return Ok(None) };
     let envelope = row_to_envelope(&r)?;
-    let body: Option<String> = r.try_get(10)?;
-    let raw_html: Option<String> = r.try_get(11)?;
-    let raw_headers: Option<String> = r.try_get(12)?;
+    // The Maildir file is the sole source of body content; empty when not fetched.
+    let (body, raw_html, raw_headers) = match maildir.read_parsed(account_id, folder, uid) {
+        Some(p) => (p.text, p.raw_html, p.raw_headers),
+        None => (String::new(), None, None),
+    };
     Ok(Some(Message {
         envelope,
-        body: body.unwrap_or_default(),
+        body,
         raw_html,
         raw_headers,
+        raw: None,
     }))
 }
 
-pub async fn delete_message(db: &Db, account_id: i64, folder: &str, uid: u64) -> Result<()> {
+pub async fn delete_message(
+    db: &Db,
+    maildir: &MaildirStore,
+    account_id: &str,
+    folder: &str,
+    uid: u64,
+) -> Result<()> {
     sqlx::query("DELETE FROM messages WHERE account_id = ? AND folder = ? AND uid = ?")
         .bind(account_id)
         .bind(folder)
         .bind(uid as i64)
         .execute(db)
         .await?;
+    maildir.delete(account_id, folder, uid);
     Ok(())
 }
 
@@ -212,7 +239,8 @@ pub async fn delete_message(db: &Db, account_id: i64, folder: &str, uid: u64) ->
 /// source row is missing.
 pub async fn move_message(
     db: &Db,
-    account_id: i64,
+    maildir: &MaildirStore,
+    account_id: &str,
     from_folder: &str,
     uid: u64,
     to_folder: &str,
@@ -224,13 +252,15 @@ pub async fn move_message(
         .bind(uid as i64)
         .execute(db)
         .await?;
+    maildir.move_to(account_id, from_folder, uid, to_folder);
     Ok(())
 }
 
 /// Update the seen/flagged flags of a cached message (each optional).
 pub async fn set_flags(
     db: &Db,
-    account_id: i64,
+    maildir: &MaildirStore,
+    account_id: &str,
     folder: &str,
     uid: u64,
     seen: Option<bool>,
@@ -256,11 +286,14 @@ pub async fn set_flags(
         .execute(db)
         .await?;
     }
+    // Mirror the resulting flags onto the Maildir filename (no-op if no file).
+    let (final_seen, final_flagged) = flags_of(db, account_id, folder, uid).await;
+    maildir.set_flags(account_id, folder, uid, final_seen, final_flagged);
     Ok(())
 }
 
 /// True if the account has any cached messages (used to decide offline display).
-pub async fn has_messages(db: &Db, account_id: i64) -> Result<bool> {
+pub async fn has_messages(db: &Db, account_id: &str) -> Result<bool> {
     let n: i64 = sqlx::query_scalar("SELECT count(*) FROM messages WHERE account_id = ?")
         .bind(account_id)
         .fetch_one(db)
@@ -269,7 +302,7 @@ pub async fn has_messages(db: &Db, account_id: i64) -> Result<bool> {
 }
 
 /// Full-text search within one folder's cached mail (subject/sender/body).
-pub async fn search(db: &Db, account_id: i64, folder: &str, query: &str) -> Result<Vec<Envelope>> {
+pub async fn search(db: &Db, account_id: &str, folder: &str, query: &str) -> Result<Vec<Envelope>> {
     let fts = build_fts_query(query);
     if fts.is_empty() {
         return load_envelopes(db, account_id, folder).await;
@@ -310,7 +343,7 @@ fn build_fts_query(query: &str) -> String {
 /// grouped query. Used for an instant sidebar estimate before the live STATUS
 /// sweep lands. Counts only what is cached (the synced window), so `total` can
 /// undercount a large folder - the sweep replaces it with the server truth.
-pub async fn count_by_folder(db: &Db, account_id: i64) -> Result<Vec<(String, usize, usize)>> {
+pub async fn count_by_folder(db: &Db, account_id: &str) -> Result<Vec<(String, usize, usize)>> {
     let rows = sqlx::query(
         "SELECT folder, COUNT(*), SUM(CASE WHEN seen = 0 THEN 1 ELSE 0 END) \
          FROM messages WHERE account_id = ? GROUP BY folder",
@@ -331,106 +364,96 @@ pub async fn count_by_folder(db: &Db, account_id: i64) -> Result<Vec<(String, us
 
 // Port adapter ----------------------------------------------------------
 
-/// [`MailCache`] backed by the shared SQLite pool; one-line delegations to the
-/// free functions above.
+/// [`MailCache`] backed by the shared SQLite index plus a [`MaildirStore`] for
+/// message content; one-line delegations to the free functions above.
 #[allow(dead_code)] // port consumed from Phase 2 onward
 pub struct SqliteMailCache {
     db: Db,
+    maildir: MaildirStore,
 }
 
 impl SqliteMailCache {
-    pub fn new(db: Db) -> Self {
-        Self { db }
+    pub fn new(db: Db, maildir: MaildirStore) -> Self {
+        Self { db, maildir }
     }
 }
 
 #[async_trait::async_trait]
 impl MailCache for SqliteMailCache {
-    async fn upsert_folders(&self, account_id: i64, folders: &[Folder]) -> Result<()> {
+    async fn upsert_folders(&self, account_id: &str, folders: &[Folder]) -> Result<()> {
         upsert_folders(&self.db, account_id, folders).await
     }
 
-    async fn load_folders(&self, account_id: i64) -> Result<Vec<Folder>> {
+    async fn load_folders(&self, account_id: &str) -> Result<Vec<Folder>> {
         load_folders(&self.db, account_id).await
     }
 
     async fn upsert_envelopes(
         &self,
-        account_id: i64,
+        account_id: &str,
         folder: &str,
         envelopes: &[Envelope],
     ) -> Result<()> {
         upsert_envelopes(&self.db, account_id, folder, envelopes).await
     }
 
-    async fn load_envelopes(&self, account_id: i64, folder: &str) -> Result<Vec<Envelope>> {
+    async fn load_envelopes(&self, account_id: &str, folder: &str) -> Result<Vec<Envelope>> {
         load_envelopes(&self.db, account_id, folder).await
     }
 
-    async fn count_by_folder(&self, account_id: i64) -> Result<Vec<(String, usize, usize)>> {
+    async fn count_by_folder(&self, account_id: &str) -> Result<Vec<(String, usize, usize)>> {
         count_by_folder(&self.db, account_id).await
     }
 
     async fn store_body(
         &self,
-        account_id: i64,
+        account_id: &str,
         folder: &str,
         uid: u64,
-        body: &str,
-        raw_html: Option<&str>,
-        raw_headers: Option<&str>,
+        raw: Option<&[u8]>,
     ) -> Result<()> {
-        store_body(
-            &self.db,
-            account_id,
-            folder,
-            uid,
-            body,
-            raw_html,
-            raw_headers,
-        )
-        .await
+        store_body(&self.db, &self.maildir, account_id, folder, uid, raw).await
     }
 
     async fn load_message(
         &self,
-        account_id: i64,
+        account_id: &str,
         folder: &str,
         uid: u64,
     ) -> Result<Option<Message>> {
-        load_message(&self.db, account_id, folder, uid).await
+        load_message(&self.db, &self.maildir, account_id, folder, uid).await
     }
 
-    async fn delete_message(&self, account_id: i64, folder: &str, uid: u64) -> Result<()> {
-        delete_message(&self.db, account_id, folder, uid).await
+    async fn delete_message(&self, account_id: &str, folder: &str, uid: u64) -> Result<()> {
+        delete_message(&self.db, &self.maildir, account_id, folder, uid).await
     }
 
     async fn move_message(
         &self,
-        account_id: i64,
+        account_id: &str,
         from_folder: &str,
         uid: u64,
         to_folder: &str,
     ) -> Result<()> {
-        move_message(&self.db, account_id, from_folder, uid, to_folder).await
+        move_message(&self.db, &self.maildir, account_id, from_folder, uid, to_folder).await
     }
 
     async fn set_flags(
         &self,
-        account_id: i64,
+        account_id: &str,
         folder: &str,
         uid: u64,
         seen: Option<bool>,
         flagged: Option<bool>,
     ) -> Result<()> {
-        set_flags(&self.db, account_id, folder, uid, seen, flagged).await
+        set_flags(&self.db, &self.maildir, account_id, folder, uid, seen, flagged).await
     }
 
-    async fn has_messages(&self, account_id: i64) -> Result<bool> {
+    async fn has_messages(&self, account_id: &str) -> Result<bool> {
         has_messages(&self.db, account_id).await
     }
 
-    async fn search(&self, account_id: i64, folder: &str, query: &str) -> Result<Vec<Envelope>> {
+    async fn search(&self, account_id: &str, folder: &str, query: &str) -> Result<Vec<Envelope>> {
         search(&self.db, account_id, folder, query).await
     }
 }
@@ -461,6 +484,26 @@ mod tests {
         db::open(Path::new(":memory:")).await.unwrap()
     }
 
+    /// A scratch Maildir root that cleans up on drop, for the cache tests.
+    struct Scratch(std::path::PathBuf);
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    fn mdir() -> (MaildirStore, Scratch) {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let p = std::env::temp_dir().join(format!("pesan-cache-md-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&p);
+        (MaildirStore::new(p.clone()), Scratch(p))
+    }
+
+    /// A raw text/html message whose derived plain text contains `roadmap`.
+    const RAW: &[u8] = b"From: Jane <jane@acme.io>\r\nSubject: Q3 roadmap review\r\n\
+Content-Type: text/html\r\n\r\n<p>let us discuss the roadmap sequencing</p>\r\n";
+
     #[tokio::test]
     async fn folders_round_trip() {
         let c = conn().await;
@@ -478,8 +521,8 @@ mod tests {
                 category: FolderCategory::Label,
             },
         ];
-        upsert_folders(&c, 1, &folders).await.unwrap();
-        let got = load_folders(&c, 1).await.unwrap();
+        upsert_folders(&c, "a1", &folders).await.unwrap();
+        let got = load_folders(&c, "a1").await.unwrap();
         assert_eq!(got.len(), 2);
         assert_eq!(got[0].name, "INBOX");
         assert_eq!(got[1].category, FolderCategory::Label);
@@ -488,79 +531,88 @@ mod tests {
     #[tokio::test]
     async fn envelopes_upsert_preserves_body_and_search_works() {
         let c = conn().await;
+        let (md, _s) = mdir();
         upsert_envelopes(
             &c,
-            1,
+            "a1",
             "INBOX",
             &[env(10, "Q3 roadmap review", "jane@acme.io", false)],
         )
         .await
         .unwrap();
-        store_body(
-            &c,
-            1,
-            "INBOX",
-            10,
-            "let us discuss the roadmap sequencing",
-            Some("<p>let us discuss the roadmap sequencing</p>"),
-            Some("Subject: Q3 roadmap review\r\nFrom: jane@acme.io"),
-        )
-        .await
-        .unwrap();
+        // The raw message goes to the Maildir file; nothing body-related to SQLite.
+        store_body(&c, &md, "a1", "INBOX", 10, Some(RAW)).await.unwrap();
 
-        // Re-upsert (e.g. flags changed) must not wipe the cached body.
+        // Re-upsert (e.g. flags changed) must not remove the stored file.
         upsert_envelopes(
             &c,
-            1,
+            "a1",
             "INBOX",
             &[env(10, "Q3 roadmap review", "jane@acme.io", true)],
         )
         .await
         .unwrap();
-        let msg = load_message(&c, 1, "INBOX", 10).await.unwrap().unwrap();
+        let msg = load_message(&c, &md, "a1", "INBOX", 10).await.unwrap().unwrap();
         assert!(msg.envelope.flags.seen);
-        assert_eq!(msg.body, "let us discuss the roadmap sequencing");
-        assert_eq!(
-            msg.raw_html.as_deref(),
-            Some("<p>let us discuss the roadmap sequencing</p>")
-        );
-        // Raw headers persist through the cache (and survive the re-upsert) so
-        // the reader can show full headers offline after one open.
-        assert_eq!(
-            msg.raw_headers.as_deref(),
-            Some("Subject: Q3 roadmap review\r\nFrom: jane@acme.io")
+        // Body + HTML source + raw headers are re-derived from the Maildir file.
+        assert!(msg.body.contains("roadmap sequencing"));
+        assert!(msg.raw_html.as_deref().unwrap().contains("<p>"));
+        assert!(
+            msg.raw_headers
+                .as_deref()
+                .unwrap()
+                .contains("Subject: Q3 roadmap review")
         );
 
-        // FTS matches subject and body (prefix), scoped to the folder + account.
-        assert_eq!(search(&c, 1, "INBOX", "roadmap").await.unwrap().len(), 1);
-        assert_eq!(search(&c, 1, "INBOX", "sequenc").await.unwrap().len(), 1);
-        assert_eq!(search(&c, 1, "INBOX", "nonsense").await.unwrap().len(), 0);
+        // FTS indexes subject + sender only: subject/sender terms match, but a
+        // body-only word does not (body lives on disk, not in the index).
+        assert_eq!(search(&c, "a1", "INBOX", "roadmap").await.unwrap().len(), 1);
+        assert_eq!(search(&c, "a1", "INBOX", "jane").await.unwrap().len(), 1);
+        assert_eq!(search(&c, "a1", "INBOX", "sequenc").await.unwrap().len(), 0);
+        assert_eq!(search(&c, "a1", "INBOX", "nonsense").await.unwrap().len(), 0);
         // Other account/folder does not leak.
-        assert_eq!(search(&c, 2, "INBOX", "roadmap").await.unwrap().len(), 0);
+        assert_eq!(search(&c, "a2", "INBOX", "roadmap").await.unwrap().len(), 0);
     }
 
     #[tokio::test]
-    async fn delete_removes_from_cache_and_fts() {
+    async fn store_body_writes_maildir_file() {
         let c = conn().await;
-        upsert_envelopes(&c, 1, "INBOX", &[env(10, "hello world", "a@b.io", false)])
+        let (md, _s) = mdir();
+        upsert_envelopes(&c, "a1", "INBOX", &[env(10, "s", "a@b.io", true)])
             .await
             .unwrap();
-        assert!(has_messages(&c, 1).await.unwrap());
-        delete_message(&c, 1, "INBOX", 10).await.unwrap();
-        assert!(!has_messages(&c, 1).await.unwrap());
-        assert_eq!(search(&c, 1, "INBOX", "hello").await.unwrap().len(), 0);
+        store_body(&c, &md, "a1", "INBOX", 10, Some(RAW)).await.unwrap();
+        // The interoperable file holds the verbatim raw message.
+        assert_eq!(md.read("a1", "INBOX", 10).as_deref(), Some(RAW));
+    }
+
+    #[tokio::test]
+    async fn delete_removes_from_cache_fts_and_file() {
+        let c = conn().await;
+        let (md, _s) = mdir();
+        upsert_envelopes(&c, "a1", "INBOX", &[env(10, "hello world", "a@b.io", false)])
+            .await
+            .unwrap();
+        store_body(&c, &md, "a1", "INBOX", 10, Some(RAW)).await.unwrap();
+        assert!(has_messages(&c, "a1").await.unwrap());
+        assert!(md.read("a1", "INBOX", 10).is_some());
+        delete_message(&c, &md, "a1", "INBOX", 10).await.unwrap();
+        assert!(!has_messages(&c, "a1").await.unwrap());
+        assert_eq!(search(&c, "a1", "INBOX", "hello").await.unwrap().len(), 0);
+        assert!(md.read("a1", "INBOX", 10).is_none());
     }
 
     #[tokio::test]
     async fn set_flags_updates_columns() {
         let c = conn().await;
-        upsert_envelopes(&c, 1, "INBOX", &[env(10, "s", "a@b.io", false)])
+        let (md, _s) = mdir();
+        upsert_envelopes(&c, "a1", "INBOX", &[env(10, "s", "a@b.io", false)])
             .await
             .unwrap();
-        set_flags(&c, 1, "INBOX", 10, Some(true), Some(true))
+        set_flags(&c, &md, "a1", "INBOX", 10, Some(true), Some(true))
             .await
             .unwrap();
-        let m = load_message(&c, 1, "INBOX", 10).await.unwrap().unwrap();
+        let m = load_message(&c, &md, "a1", "INBOX", 10).await.unwrap().unwrap();
         assert!(m.envelope.flags.seen && m.envelope.flags.flagged);
     }
 }
