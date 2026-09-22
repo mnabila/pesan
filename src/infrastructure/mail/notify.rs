@@ -124,7 +124,7 @@ impl DesktopNotifier {
             Ok(g) => g,
             Err(_) => return false,
         };
-        if last.elapsed() < Duration::from_secs(300) {
+        if last.elapsed() < Duration::from_secs(30) {
             return false;
         }
         *last = Instant::now();
@@ -157,9 +157,17 @@ impl crate::application::ports::Notifier for DesktopNotifier {
                 Ok(())
             }
             Err(e) => {
-                // The daemon went away; suppress further attempts until the next probe.
-                tracing::debug!("desktop notification failed: {e:#}");
-                self.available.store(false, Ordering::Relaxed);
+                // A send failure is usually transient (a brief D-Bus hiccup), not
+                // the daemon going away for good. Only suppress future attempts if
+                // a fresh probe confirms no server is reachable; otherwise keep
+                // notifying so one blip doesn't blackout mail for the cooldown.
+                tracing::warn!("desktop notification failed: {e:#}");
+                if notify_rust::get_server_information().is_err() {
+                    self.available.store(false, Ordering::Relaxed);
+                    if let Ok(mut last) = self.last_checked.lock() {
+                        *last = Instant::now();
+                    }
+                }
                 Ok(())
             }
         }

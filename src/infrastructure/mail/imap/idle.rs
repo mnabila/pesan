@@ -117,6 +117,12 @@ fn watcher_main(
     events: UnboundedSender<MailUpdate>,
     shutdown: Arc<Shutdown>,
 ) {
+    // Carried across reconnects so mail that arrived while the session was down
+    // is not skipped: `run_session` seeds `next_uid` from the server only on the
+    // first connect, then keeps advancing this value. `uid_validity` guards it -
+    // a change means the server renumbered UIDs and the threshold must reseed.
+    let mut next_uid: Option<u32> = None;
+    let mut uid_validity: Option<u32> = None;
     while !shutdown.is_set() {
         // Refresh the access token off any runtime (blocking reqwest). Password
         // accounts have no token; LOGIN uses the stored password directly.
@@ -157,6 +163,8 @@ fn watcher_main(
             poll_interval,
             &events,
             &shutdown,
+            &mut next_uid,
+            &mut uid_validity,
         ));
         drop(runtime);
 
@@ -195,6 +203,7 @@ enum WokeBy {
 
 /// Run a single connected session until shutdown (`Ok`) or a network error
 /// (`Err`, prompting a reconnect).
+#[allow(clippy::too_many_arguments)]
 async fn run_session(
     params: &ConnectParams,
     access_token: &str,
@@ -203,14 +212,22 @@ async fn run_session(
     poll_interval: Duration,
     events: &UnboundedSender<MailUpdate>,
     shutdown: &Shutdown,
+    next_uid: &mut Option<u32>,
+    uid_validity: &mut Option<u32>,
 ) -> Result<()> {
     let mut session = connect_and_auth(params, access_token).await?;
     let status = session
         .select(mailbox)
         .await
         .with_context(|| format!("SELECT {mailbox} for idle"))?;
-    // New arrivals get UID >= uid_next at connect time.
-    let mut next_uid = status.uid_next.unwrap_or(1);
+
+    if reconcile_threshold(next_uid, uid_validity, status.uid_next, status.uid_validity) {
+        tracing::warn!(
+            "idle[{account}]: UIDVALIDITY changed to {:?}; reseeding from uid_next",
+            status.uid_validity
+        );
+    }
+    let mut cur_uid = next_uid.unwrap_or(1);
 
     let supports_idle = session
         .capabilities()
@@ -218,7 +235,7 @@ async fn run_session(
         .map(|c| c.has_str("IDLE"))
         .unwrap_or(false);
     tracing::info!(
-        "idle[{account}]: watching {mailbox} (idle={supports_idle}, uid_next={next_uid})"
+        "idle[{account}]: watching {mailbox} (idle={supports_idle}, uid_next={cur_uid})"
     );
 
     loop {
@@ -243,10 +260,13 @@ async fn run_session(
                 let _ = session.logout().await;
                 return Ok(());
             }
-            WokeBy::Renew => continue,
-            WokeBy::Data => {
-                let (fresh, new_next) = fetch_since(&mut session, next_uid).await?;
-                next_uid = new_next.max(next_uid);
+            // Both a data signal and a renewal timeout reconcile against the
+            // threshold: an arrival in the `done()`->`init()` gap that never
+            // re-signals NewData would otherwise be missed until the next one.
+            WokeBy::Renew | WokeBy::Data => {
+                let (fresh, new_next) = fetch_since(&mut session, cur_uid).await?;
+                cur_uid = new_next.max(cur_uid);
+                *next_uid = Some(cur_uid);
                 if !fresh.is_empty() {
                     let _ = events.send(MailUpdate::Arrived(NewMail {
                         account: account.to_string(),
@@ -257,6 +277,34 @@ async fn run_session(
             }
         }
     }
+}
+
+/// Reconcile the carried UID watch threshold against a freshly-selected mailbox.
+///
+/// `next_uid`/`uid_validity` are the values carried across reconnects. On the
+/// first connect (`next_uid` is `None`) the threshold seeds from the server's
+/// `uid_next`. On a reconnect the carried threshold is kept, so an arrival during
+/// the outage is still fetched. If the server's `uid_validity` differs from the
+/// carried one, the old UIDs are meaningless and the threshold is reseeded from
+/// `uid_next`. Returns `true` when a UIDVALIDITY change forced a reseed.
+fn reconcile_threshold(
+    next_uid: &mut Option<u32>,
+    uid_validity: &mut Option<u32>,
+    server_next: Option<u32>,
+    server_validity: Option<u32>,
+) -> bool {
+    let mut reseeded = false;
+    if let (Some(prev), Some(cur)) = (*uid_validity, server_validity)
+        && prev != cur
+    {
+        *next_uid = None;
+        reseeded = true;
+    }
+    *uid_validity = server_validity.or(*uid_validity);
+    if next_uid.is_none() {
+        *next_uid = Some(server_next.unwrap_or(1));
+    }
+    reseeded
 }
 
 /// Issue one IDLE and wait for activity, a renewal timeout, or shutdown.
@@ -316,4 +364,48 @@ async fn fetch_since(session: &mut ImapSession, next_uid: u32) -> Result<(Vec<En
         .unwrap_or(next_uid);
     fresh.sort_by_key(|e| std::cmp::Reverse(e.date));
     Ok((fresh, new_next))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reconcile_threshold;
+
+    #[test]
+    fn seeds_from_server_on_first_connect() {
+        let mut next = None;
+        let mut validity = None;
+        let reseeded = reconcile_threshold(&mut next, &mut validity, Some(42), Some(7));
+        assert!(!reseeded);
+        assert_eq!(next, Some(42));
+        assert_eq!(validity, Some(7));
+    }
+
+    #[test]
+    fn preserves_carried_threshold_across_reconnect() {
+        // A reconnect where the server's uid_next has advanced (mail arrived while
+        // down) must keep the lower carried threshold so the gap is fetched.
+        let mut next = Some(42);
+        let mut validity = Some(7);
+        let reseeded = reconcile_threshold(&mut next, &mut validity, Some(50), Some(7));
+        assert!(!reseeded);
+        assert_eq!(next, Some(42), "carried threshold must not jump to uid_next");
+    }
+
+    #[test]
+    fn reseeds_when_uid_validity_changes() {
+        let mut next = Some(42);
+        let mut validity = Some(7);
+        let reseeded = reconcile_threshold(&mut next, &mut validity, Some(3), Some(9));
+        assert!(reseeded);
+        assert_eq!(next, Some(3), "renumbered mailbox reseeds from uid_next");
+        assert_eq!(validity, Some(9));
+    }
+
+    #[test]
+    fn missing_server_uid_next_falls_back_to_one() {
+        let mut next = None;
+        let mut validity = None;
+        reconcile_threshold(&mut next, &mut validity, None, None);
+        assert_eq!(next, Some(1));
+    }
 }

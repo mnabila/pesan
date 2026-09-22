@@ -154,6 +154,12 @@ async fn owner_task(
     // server-side changes IDLE doesn't report, pushing refreshed lists to clients.
     let mut resync_iv = config.daemon.resync_interval().map(tokio::time::interval);
 
+    // Periodic reconnect sweep: any in-scope account not currently connected (a
+    // failed initial connect, or a watcher that died) is retried, so a transient
+    // startup failure self-heals instead of leaving that account silent until a
+    // TUI client happens to ask for it.
+    let mut retry_iv = tokio::time::interval(poll.max(std::time::Duration::from_secs(60)));
+
     // Eager startup: fire every in-scope account's connect at once (parallel).
     let accounts = database::accounts::list(&pool).await.unwrap_or_default();
     let want: Vec<Account> = accounts
@@ -259,6 +265,24 @@ async fn owner_task(
                             services.clone(), handle.clone(), pushes.clone(),
                             id, name.clone(), folder.clone(),
                         ));
+                    }
+                }
+            }
+            _ = retry_iv.tick() => {
+                let accts = database::accounts::list(&pool).await.unwrap_or_default();
+                for account in accts
+                    .into_iter()
+                    .filter(|a| a.id.is_some() && config.daemon.includes(&a.name))
+                {
+                    let id = account.id.expect("filtered to Some");
+                    // Skip already-connected or in-flight accounts; `connecting`
+                    // guards against a double connect with the eager startup.
+                    if !sources.contains_key(&id) && connecting.insert(id) {
+                        tracing::info!("daemon: retrying connect for account '{}'", account.name);
+                        spawn_connect(
+                            &config, &services, &folders, cap, poll, account, id,
+                            &arrivals_tx, &done_tx,
+                        );
                     }
                 }
             }
@@ -480,14 +504,15 @@ async fn prefetch_bodies(
 }
 
 /// Fire one coalesced desktop notification for a batch, honoring config. Gated
-/// on `daemon.notify`; content follows the `notifications` settings.
+/// on `daemon.notify` and the master `notifications.enabled`; content follows
+/// the `notifications` settings.
 fn notify(
     config: &Config,
     services: &crate::application::Services,
     account: &str,
     envelopes: &[Envelope],
 ) {
-    if !config.daemon.notify || envelopes.is_empty() {
+    if !config.daemon.notify || !config.notifications.enabled || envelopes.is_empty() {
         return;
     }
     let sound = config.notifications.sound_hint();
