@@ -108,7 +108,7 @@ pub(super) fn worker_main(
             )
             .await
             {
-                tracing::warn!("IMAP command timed out; shutting down wedged session");
+                tracing::warn!("IMAP session wedged (timeout or dropped connection); shutting down");
                 wedged = true;
                 break;
             }
@@ -157,12 +157,20 @@ async fn handle_cmd(
         }};
     }
     /// Await `$fut` under [`OP_TIMEOUT`]; on timeout send a timeout error on
-    /// `$reply` and return `false` from `handle_cmd`.
+    /// `$reply` and return `false` from `handle_cmd`. A result whose error means
+    /// the connection itself is gone (see [`is_conn_dead`]) is still delivered to
+    /// the caller, then also wedges the session (returns `false`) so the worker
+    /// tears down and fires `on_lost` instead of serving instant errors from a
+    /// dead session forever.
     macro_rules! bounded {
         ($reply:expr, $fut:expr) => {
             match tokio::time::timeout(OP_TIMEOUT, $fut).await {
                 Ok(result) => {
+                    let dead = matches!(&result, Err(e) if is_conn_dead(e));
                     let _ = $reply.send(result);
+                    if dead {
+                        return false;
+                    }
                 }
                 Err(_) => {
                     let _ = $reply.send(Err(anyhow!(
@@ -290,6 +298,26 @@ fn refresh_token_if_stale(
     *expires_at = token_expiry(&tokens);
     *access_token = tokens.access_token;
     Ok(())
+}
+
+/// True when an op error means the IMAP connection itself is gone (dropped by
+/// the server, reset, or the stream desynced) rather than a benign per-op
+/// failure. Such a session can never recover on its own, so the worker treats it
+/// like a timeout wedge - tearing down and firing `on_lost` - instead of serving
+/// instant errors from a dead connection until the process restarts. Formats the
+/// full chain (`{:#}`) so the underlying io/protocol cause is inspected, not just
+/// the outer op context (e.g. "LIST folders").
+fn is_conn_dead(e: &anyhow::Error) -> bool {
+    let m = format!("{e:#}").to_ascii_lowercase();
+    m.contains("unexpected end") // EOF mid-response
+        || m.contains("end of stream")
+        || m.contains("eof")
+        || m.contains("connection reset")
+        || m.contains("connection aborted")
+        || m.contains("connection closed")
+        || m.contains("broken pipe")
+        || m.contains("not connected")
+        || m.contains("* bye") // server-initiated logout
 }
 
 pub(crate) async fn connect_and_auth(

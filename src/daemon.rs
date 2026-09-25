@@ -142,6 +142,11 @@ async fn owner_task(
 
     let (arrivals_tx, mut arrivals_rx) = mpsc::unbounded_channel::<Arrival>();
     let (done_tx, mut done_rx) = mpsc::unbounded_channel::<ConnectOutcome>();
+    // A live session that wedged (op timeout or a dropped connection) reports its
+    // account id here so the owner evicts the dead source; the retry sweep and the
+    // on-demand `Handle` path then reconnect it, instead of serving a dead session
+    // forever.
+    let (lost_tx, mut lost_rx) = mpsc::unbounded_channel::<String>();
     let mut sources: HashMap<String, Box<dyn MailSource>> = HashMap::new();
     let mut names: HashMap<String, String> = HashMap::new();
     let mut watch_handles: Vec<Box<dyn crate::application::ports::WatchHandle>> = Vec::new();
@@ -171,7 +176,7 @@ async fn owner_task(
     for account in want {
         let id = account.id.clone().expect("filtered to Some");
         if connecting.insert(id.clone()) {
-            spawn_connect(&config, &services, &folders, cap, poll, account, id, &arrivals_tx, &done_tx);
+            spawn_connect(&config, &services, &folders, cap, poll, account, id, &arrivals_tx, &done_tx, &lost_tx);
         }
     }
 
@@ -196,7 +201,7 @@ async fn owner_task(
                             if connecting.insert(id.clone()) {
                                 spawn_connect(
                                     &config, &services, &folders, cap, poll, acct, id,
-                                    &arrivals_tx, &done_tx,
+                                    &arrivals_tx, &done_tx, &lost_tx,
                                 );
                             }
                         }
@@ -252,6 +257,14 @@ async fn owner_task(
                     envelopes: mail.envelopes,
                 });
             }
+            // A live session wedged: drop it so it stops being served. The retry
+            // sweep (and any on-demand `Handle` request) reconnects it fresh.
+            Some(id) = lost_rx.recv() => {
+                if sources.remove(&id).is_some() {
+                    let name = names.remove(&id).unwrap_or_else(|| id.clone());
+                    tracing::warn!("daemon: session for '{name}' dropped; evicted, will reconnect");
+                }
+            }
             // Periodic re-sync tick: re-list every connected account's watched
             // folders off-owner (handles are Send+Clone) and push any changes.
             _ = async { match resync_iv.as_mut() {
@@ -282,7 +295,7 @@ async fn owner_task(
                         tracing::info!("daemon: retrying connect for account '{}'", account.name);
                         spawn_connect(
                             &config, &services, &folders, cap, poll, account, id,
-                            &arrivals_tx, &done_tx,
+                            &arrivals_tx, &done_tx, &lost_tx,
                         );
                     }
                 }
@@ -305,14 +318,16 @@ fn spawn_connect(
     id: String,
     arrivals_tx: &mpsc::UnboundedSender<Arrival>,
     done_tx: &mpsc::UnboundedSender<ConnectOutcome>,
+    lost_tx: &mpsc::UnboundedSender<String>,
 ) {
     let (config, services, folders) = (config.clone(), services.clone(), folders.to_vec());
     let arrivals_tx = arrivals_tx.clone();
     let done_tx = done_tx.clone();
+    let lost_tx = lost_tx.clone();
     tokio::spawn(async move {
         let name = account.name.clone();
         let result =
-            do_connect(&config, &services, &folders, cap, poll, &account, &id, &arrivals_tx).await;
+            do_connect(&config, &services, &folders, cap, poll, &account, &id, &arrivals_tx, &lost_tx).await;
         let _ = done_tx.send(ConnectOutcome { id, name, result });
     });
 }
@@ -330,6 +345,7 @@ async fn do_connect(
     account: &Account,
     id: &str,
     arrivals_tx: &mpsc::UnboundedSender<Arrival>,
+    lost_tx: &mpsc::UnboundedSender<String>,
 ) -> Result<ConnectSpoils, String> {
     let params = match resolve_connect_params(config, account, services.tokens.as_ref()).await {
         Ok(Some(p)) => p,
@@ -337,10 +353,28 @@ async fn do_connect(
         Err(e) => return Err(format!("account '{}' config error: {e:#}", account.name)),
     };
     let want = folders.first().cloned().unwrap_or_else(|| "INBOX".to_string());
+    // The worker reports a wedged session by its account *label*; relay that into
+    // the owner's eviction channel keyed by this account's *id*.
+    let (w_lost_tx, mut w_lost_rx) = mpsc::unbounded_channel::<String>();
+    {
+        let (lost_tx, id) = (lost_tx.clone(), id.to_string());
+        tokio::spawn(async move {
+            while w_lost_rx.recv().await.is_some() {
+                let _ = lost_tx.send(id.clone());
+            }
+        });
+    }
     // sync_all=false: return a usable handle fast; other folders warm on demand.
-    let live = connect_account(services, params.clone(), Some(id.to_string()), want, false, None)
-        .await
-        .map_err(|e| format!("connect '{}' failed: {e}", account.name))?;
+    let live = connect_account(
+        services,
+        params.clone(),
+        Some(id.to_string()),
+        want,
+        false,
+        Some(w_lost_tx),
+    )
+    .await
+    .map_err(|e| format!("connect '{}' failed: {e}", account.name))?;
     tracing::info!("daemon: connected '{}' ({} folders)", account.name, live.folders.len());
 
     let handle = live.source.imap_handle();
