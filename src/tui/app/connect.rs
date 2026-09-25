@@ -1,3 +1,5 @@
+use crate::tui::app::event;
+
 use super::*;
 
 impl App {
@@ -11,12 +13,12 @@ impl App {
     }
 
     /// Apply a background job's progress update (delivered as [`Event::JobProgress`]).
-    pub fn on_job_progress(&mut self, p: crate::tui::app::event::JobProgress) {
+    pub fn on_job_progress(&mut self, p: event::JobProgress) {
         self.jobs.set_progress(p.id, p.done, p.total);
     }
 
     /// Apply a background job's completion (delivered as [`Event::JobDone`]).
-    pub fn on_job_done(&mut self, done: crate::tui::app::event::JobDone) {
+    pub fn on_job_done(&mut self, done: event::JobDone) {
         self.jobs.finish(done.id, done.error);
     }
 
@@ -46,7 +48,7 @@ impl App {
     /// [`Event::Connected`]). Stale results - the user switched accounts while
     /// the connect was in flight - are dropped. On success the live source is
     /// swapped in and mail is loaded; on failure the cached view stands.
-    pub async fn on_connected(&mut self, done: crate::tui::app::event::Connected) {
+    pub async fn on_connected(&mut self, done: event::Connected) {
         // Ignore a connect that finished for an account we're no longer on.
         if done.account != self.active_account_name() {
             return;
@@ -61,38 +63,61 @@ impl App {
                 // cached, so applying it does zero network work on the UI loop.
                 self.source = data.source;
                 self.live = true;
+                // The user can navigate folders while a (re)connect is in flight -
+                // navigation stays live on the cache during the reconnect window.
+                // Capture where they are *now* so a connect that loaded a different
+                // folder (the one they were on when it started) doesn't yank the
+                // view back to it. Empty = startup with no folders yet.
+                let current_folder = self.selected_folder_name().to_string();
+                let stayed = current_folder.is_empty() || current_folder == data.folder;
                 self.set_folders(data.folders).await;
                 // Show cached counts immediately; the live sweep below corrects them.
                 self.apply_cached_counts().await;
-                self.selected_folder = self
-                    .folders
-                    .iter()
-                    .position(|f| f.name == data.folder)
-                    .unwrap_or(0);
-                self.sidebar_sel = SidebarItem::Folder(self.selected_folder);
-                self.envelopes = data.envelopes;
-                self.selected_message = 0;
-                self.reader_offset = 0;
-                // A fresh connect / reconnect loads the newest window, so any
-                // paged-in older messages are gone and paging restarts.
-                self.loading_older = false;
-                self.older_exhausted = false;
-                // On a fresh connect, clear the reader/search; on a reconnect keep
-                // them so the current filter and open message can be restored.
-                let filter = if reconnect.is_some() {
-                    self.search.as_ref().map(|s| s.input.text().to_string())
+                if stayed {
+                    self.selected_folder = self
+                        .folders
+                        .iter()
+                        .position(|f| f.name == data.folder)
+                        .unwrap_or(0);
+                    self.sidebar_sel = SidebarItem::Folder(self.selected_folder);
+                    self.envelopes = data.envelopes;
+                    self.selected_message = 0;
+                    self.reader_offset = 0;
+                    // A fresh connect / reconnect loads the newest window, so any
+                    // paged-in older messages are gone and paging restarts.
+                    self.loading_older = false;
+                    self.older_exhausted = false;
+                    // On a fresh connect, clear the reader/search; on a reconnect keep
+                    // them so the current filter and open message can be restored.
+                    let filter = if reconnect.is_some() {
+                        self.search.as_ref().map(|s| s.input.text().to_string())
+                    } else {
+                        self.set_open_message(None);
+                        self.search = None;
+                        None
+                    };
+                    self.refresh_display_list(filter.as_deref());
+                    // Restore the highlighted row after a reconnect (by uid).
+                    if let Some(ctx) = &reconnect
+                        && let Some(uid) = ctx.select_uid
+                        && let Some(pos) = self.display_envelopes.iter().position(|e| e.uid == uid)
+                    {
+                        self.selected_message = pos;
+                    }
                 } else {
-                    self.set_open_message(None);
-                    self.search = None;
-                    None
-                };
-                self.refresh_display_list(filter.as_deref());
-                // Restore the highlighted row after a reconnect (by uid).
-                if let Some(ctx) = &reconnect
-                    && let Some(uid) = ctx.select_uid
-                    && let Some(pos) = self.display_envelopes.iter().position(|e| e.uid == uid)
-                {
-                    self.selected_message = pos;
+                    // The user moved to another folder mid-connect: keep them there
+                    // (its cached view is already showing) and pull a fresh copy of
+                    // *that* folder from the now-live source in the background.
+                    self.selected_folder = self
+                        .folders
+                        .iter()
+                        .position(|f| f.name == current_folder)
+                        .unwrap_or_else(|| {
+                            self.selected_folder
+                                .min(self.folders.len().saturating_sub(1))
+                        });
+                    self.sidebar_sel = SidebarItem::Folder(self.selected_folder);
+                    self.spawn_folder_refresh(&current_folder);
                 }
                 // Folder names are in; fetch their counts in the background so
                 // the (slow, per-folder) STATUS sweep never delays this point.
@@ -111,7 +136,11 @@ impl App {
                 // If the user was reading a message when the session dropped,
                 // transparently reload it so the reconnect is seamless.
                 if let Some(ctx) = &reconnect {
-                    if ctx.was_reading
+                    // Only restore the open message if the user is still on the
+                    // folder they were reading; if they navigated away mid-connect
+                    // there is nothing to seamlessly reload.
+                    if stayed
+                        && ctx.was_reading
                         && self.view == View::Reader
                         && let Some(uid) = ctx.open_uid
                         && let Some(pos) = self.display_envelopes.iter().position(|e| e.uid == uid)
@@ -334,7 +363,7 @@ impl App {
     /// Apply a background all-folders sync progress update (delivered as
     /// [`Event::SyncProgress`]). Stale results for a since-switched account are
     /// dropped; the bar clears once every folder is synced.
-    pub fn on_sync_progress(&mut self, progress: crate::tui::app::event::SyncProgress) {
+    pub fn on_sync_progress(&mut self, progress: event::SyncProgress) {
         if progress.account != self.active_account_name() {
             return;
         }
@@ -347,7 +376,7 @@ impl App {
 
     /// Apply background folder counts to the sidebar (and write them through to
     /// the cache). Stale results for a since-switched account are dropped.
-    pub async fn on_folders_counted(&mut self, done: crate::tui::app::event::FoldersCounted) {
+    pub async fn on_folders_counted(&mut self, done: event::FoldersCounted) {
         if done.account != self.active_account_name() {
             return;
         }
@@ -472,7 +501,11 @@ impl App {
         let job = if quiet {
             crate::tui::app::jobs::JobGuard::new(0, None)
         } else {
-            let kind = if set_busy { JobKind::Connect } else { JobKind::Warmup };
+            let kind = if set_busy {
+                JobKind::Connect
+            } else {
+                JobKind::Warmup
+            };
             self.begin_job(kind, account)
         };
         // The live source (the foreground/active one) reports a wedged session so
@@ -553,14 +586,16 @@ impl App {
         tokio::spawn(async move {
             while let Some(update) = mail_rx.recv().await {
                 let event = match update {
-                    crate::domain::MailUpdate::Arrived(nm) => {
-                        crate::tui::app::event::Event::NewMail(nm)
-                    }
-                    crate::domain::MailUpdate::FolderSynced { account, folder, envelopes } => {
-                        crate::tui::app::event::Event::FolderRefreshed(
-                            crate::tui::app::event::FolderRefreshed { account, folder, envelopes },
-                        )
-                    }
+                    crate::domain::MailUpdate::Arrived(nm) => event::Event::NewMail(nm),
+                    crate::domain::MailUpdate::FolderSynced {
+                        account,
+                        folder,
+                        envelopes,
+                    } => event::Event::FolderRefreshed(event::FolderRefreshed {
+                        account,
+                        folder,
+                        envelopes,
+                    }),
                 };
                 if tx.send(event).is_err() {
                     break;

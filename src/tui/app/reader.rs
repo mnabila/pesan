@@ -198,7 +198,7 @@ impl App {
     /// When live, fetch the folder's messages from IMAP on a background task and
     /// deliver them as an [`Event::FolderRefreshed`]; the cache is written
     /// through there too. A no-op when offline or without an event sender.
-    fn spawn_folder_refresh(&self, folder: &str) {
+    pub(crate) fn spawn_folder_refresh(&self, folder: &str) {
         if !self.live {
             return;
         }
