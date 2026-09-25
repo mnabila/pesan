@@ -68,7 +68,8 @@ themes:
 # Optional: remap any action to your own keys, grouped by keymap section.
 # A section only affects the bindings active in that context: `global` works
 # everywhere; the others apply while that pane/screen has focus. Sections:
-# global, folders, list, reader, compose, settings, search, confirm. An
+# global, folders, list, reader, compose, settings, settings_form, search,
+# confirm (settings = account list, settings_form = account edit form). An
 # override replaces ALL built-in keys for the action within that section
 # (other sections keep their built-ins). Key syntax: a single key, a chord
 # such as gg, or ctrl+<key>/shift+<key>/alt+<key>. Key names: enter, esc,
@@ -131,13 +132,41 @@ keybinding:
     archive: a
     back: esc
   compose: # compose form (body is edited in $EDITOR)
+    focus_down: [j, down] # next header/attach field
+    focus_up: [k, up] # previous field
+    focus_right: [l, right]
+    focus_left: [h, left]
+    focus_next: tab
+    edit_field: [i, enter] # edit the focused field, or open the body in $EDITOR
+    scroll_down: J # scroll the body (only while the body row is focused)
+    scroll_up: K
+    scroll_start: [gg, home] # body top
+    scroll_end: [G, end] # body bottom
+    page_up: pgup
+    page_down: pgdn
     send: ctrl+s
     save_draft: ctrl+d
-    external_editor: ctrl+e
+    external_editor: ctrl+e # edit body in $EDITOR
     discard_draft: esc
-  settings:
+  settings: # account manager list
+    move_down: [j, down]
+    move_up: [k, up]
+    open_account: o # open / edit the selected account
+    add_account: a
+    delete_account: d
+    set_default_account: x
+    filter_accounts: /
     save_settings: W
     close_settings: esc
+  settings_form: # account edit form (field navigation); alias: account_form
+    focus_down: [j, down]
+    focus_up: [k, up]
+    focus_right: [l, right]
+    focus_left: [h, left]
+    focus_next: tab
+    edit_field: [i, enter, space, o] # edit text field / open provider chooser / toggle / activate button
+    save_settings: W
+    close_settings: esc # back to the account list
   search:
     commit_search: enter
     close_overlay: esc

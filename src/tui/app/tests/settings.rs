@@ -13,7 +13,7 @@ async fn shift_s_with_modifier_opens_settings() {
 }
 
 #[tokio::test]
-async fn account_form_field_modal_e_edits_esc_exits() {
+async fn account_form_field_modal_i_edits_esc_exits() {
     let mut app = test_app().await;
     send_key!(app, Key::ch('S'));
     send_key!(app, Key::ch('a'));
@@ -33,8 +33,8 @@ async fn account_form_field_modal_e_edits_esc_exits() {
     assert!(!app.settings.as_ref().unwrap().field_editing);
     assert_eq!(app.settings.as_ref().unwrap().form.as_ref().unwrap().name.text(), "");
 
-    // e enters edit mode
-    send_key!(app, Key::ch('e'));
+    // i enters edit mode
+    send_key!(app, Key::ch('i'));
     assert!(app.settings.as_ref().unwrap().field_editing);
     for c in "Bee".chars() {
         send_key!(app, Key::ch(c));
@@ -70,7 +70,7 @@ async fn settings_form_accepts_typed_input() {
 
     send_key!(app, Key::ch('j'));
     assert_eq!(app.settings.as_ref().unwrap().focus, SettingsFocus::Name);
-    send_key!(app, Key::ch('e'));
+    send_key!(app, Key::ch('i'));
     assert!(app.settings.as_ref().unwrap().field_editing);
     for c in "Work".chars() {
         send_key!(app, Key::ch(c));
@@ -183,7 +183,7 @@ async fn settings_view_renders_without_panic() {
     send_key!(app, Key::ch('S'));
     let mut wide = Terminal::new(TestBackend::new(100, 30)).unwrap();
     wide.draw(|f| crate::tui::views::draw(f, &app)).unwrap();
-    send_key!(app, Key::ch('e'));
+    send_key!(app, Key::ch('i'));
     wide.draw(|f| crate::tui::views::draw(f, &app)).unwrap();
     send_key!(app, Key::esc());
     send_key!(app, Key::ch('H'));

@@ -6,8 +6,8 @@ async fn compose_inline_headers_and_external_body() {
     send_key!(app, Key::ch('c')); // open compose
     assert_eq!(app.view, View::Compose);
 
-    // Focus starts on To; press e to edit, type, Enter to leave edit mode.
-    send_key!(app, Key::ch('e'));
+    // Focus starts on To; press i to edit, type, Enter to leave edit mode.
+    send_key!(app, Key::ch('i'));
     assert!(app.compose.as_ref().unwrap().editing);
     for ch in "jane@acme.io".chars() {
         send_key!(app, Key::ch(ch));
@@ -19,7 +19,7 @@ async fn compose_inline_headers_and_external_body() {
         send_key!(app, Key::ch('j'));
     }
     assert_eq!(app.compose.as_ref().unwrap().focus, ComposeFocus::Subject);
-    send_key!(app, Key::ch('e'));
+    send_key!(app, Key::ch('i'));
     for ch in "Hi there".chars() {
         send_key!(app, Key::ch(ch));
     }
@@ -55,7 +55,7 @@ async fn compose_help_opens_in_nav_mode_but_not_while_editing() {
     assert_eq!(app.view, View::Compose);
 
     // While editing a field, `?` is a literal character, not a help trigger.
-    send_key!(app, Key::ch('e'));
+    send_key!(app, Key::ch('i'));
     assert!(app.compose.as_ref().unwrap().editing);
     send_key!(app, Key::ch('?'));
     assert!(!app.help_open, "? types into the field while editing");
@@ -90,8 +90,8 @@ async fn compose_send_offline_reports_error_and_keeps_compose() {
     let draft = app.compose.as_ref().unwrap().to_draft();
     assert!(!draft.is_valid(), "empty new compose is not valid");
     // Fill the To (focus starts here) and Subject fields, then the body via
-    // the external editor. Edit each field with e ... Enter.
-    send_key!(app, Key::ch('e'));
+    // the external editor. Edit each field with i ... Enter.
+    send_key!(app, Key::ch('i'));
     for ch in "test@example.com".chars() {
         send_key!(app, Key::ch(ch));
     }
@@ -99,7 +99,7 @@ async fn compose_send_offline_reports_error_and_keeps_compose() {
     for _ in 0..2 {
         send_key!(app, Key::ch('j')); // -> Subject (To -> Bcc -> Subject)
     }
-    send_key!(app, Key::ch('e'));
+    send_key!(app, Key::ch('i'));
     for ch in "Hello".chars() {
         send_key!(app, Key::ch(ch));
     }
@@ -145,7 +145,7 @@ async fn compose_view_renders_without_panic() {
 }
 
 #[tokio::test]
-async fn compose_jk_navigates_and_e_edits_headers() {
+async fn compose_jk_navigates_and_i_edits_headers() {
     let mut app = test_app().await;
     send_key!(app, Key::ch('c'));
     // Nav mode: focus starts on To, not editing.
@@ -166,8 +166,8 @@ async fn compose_jk_navigates_and_e_edits_headers() {
     send_key!(app, Key::ch('k')); // Bcc -> To (up)
     assert_eq!(app.compose.as_ref().unwrap().focus, ComposeFocus::To);
 
-    // e enters edit mode; now keys type into the field; Esc leaves.
-    send_key!(app, Key::ch('e'));
+    // i enters edit mode; now keys type into the field; Esc leaves.
+    send_key!(app, Key::ch('i'));
     assert!(app.compose.as_ref().unwrap().editing);
     for ch in "a@b.co".chars() {
         send_key!(app, Key::ch(ch));

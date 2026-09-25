@@ -11,7 +11,10 @@ pub enum Ctx {
     List,
     Reader,
     Compose,
+    /// Account manager list (selecting/adding/deleting accounts).
     Settings,
+    /// Account edit form (field navigation within an open account).
+    SettingsForm,
     Search,
     Confirm,
 }
@@ -26,6 +29,7 @@ impl Ctx {
             "reader" => Self::Reader,
             "compose" => Self::Compose,
             "settings" => Self::Settings,
+            "settings_form" | "account_form" => Self::SettingsForm,
             "search" => Self::Search,
             "confirm" => Self::Confirm,
             _ => return None,
@@ -67,6 +71,14 @@ impl Key {
             shift: false,
         }
     }
+    pub const fn back_tab() -> Self {
+        Self {
+            code: KeyCode::BackTab,
+            ctrl: false,
+            alt: false,
+            shift: false,
+        }
+    }
     pub const fn esc() -> Self {
         Self {
             code: KeyCode::Esc,
@@ -91,6 +103,22 @@ impl Key {
             shift: false,
         }
     }
+    pub const fn up() -> Self {
+        Self {
+            code: KeyCode::Up,
+            ctrl: false,
+            alt: false,
+            shift: false,
+        }
+    }
+    pub const fn down() -> Self {
+        Self {
+            code: KeyCode::Down,
+            ctrl: false,
+            alt: false,
+            shift: false,
+        }
+    }
     pub const fn right() -> Self {
         Self {
             code: KeyCode::Right,
@@ -99,10 +127,17 @@ impl Key {
             shift: false,
         }
     }
-    #[cfg(test)]
     pub const fn home() -> Self {
         Self {
             code: KeyCode::Home,
+            ctrl: false,
+            alt: false,
+            shift: false,
+        }
+    }
+    pub const fn end() -> Self {
+        Self {
+            code: KeyCode::End,
             ctrl: false,
             alt: false,
             shift: false,
@@ -327,6 +362,15 @@ pub fn action_from_name(name: &str) -> Option<Action> {
         "move_last" => Action::MoveLast,
         "focus_next" => Action::FocusNext,
         "focus_prev" => Action::FocusPrev,
+        "focus_up" => Action::FocusUp,
+        "focus_down" => Action::FocusDown,
+        "focus_left" => Action::FocusLeft,
+        "focus_right" => Action::FocusRight,
+        "edit_field" => Action::EditField,
+        "open_account" => Action::OpenAccount,
+        "add_account" => Action::AddAccount,
+        "delete_account" => Action::DeleteAccount,
+        "set_default_account" => Action::SetDefaultAccount,
         "expand_folder" => Action::ExpandFolder,
         "collapse_folder" => Action::CollapseFolder,
         "filter_accounts" => Action::FilterAccounts,
@@ -443,6 +487,55 @@ mod tests {
         assert_eq!(resolve(Ctx::Compose, &[Key::cc('x')], &table), Some(Action::Send));
         // Settings: 's' now saves.
         assert_eq!(resolve(Ctx::Settings, &[Key::ch('s')], &table), Some(Action::SaveSettings));
+    }
+
+    #[test]
+    fn form_nav_and_edit_are_bound_by_default() {
+        let table = build_table(&HashMap::new());
+        // Compose field grid + edit.
+        assert_eq!(resolve(Ctx::Compose, &[Key::ch('j')], &table), Some(Action::FocusDown));
+        assert_eq!(resolve(Ctx::Compose, &[Key::ch('k')], &table), Some(Action::FocusUp));
+        assert_eq!(resolve(Ctx::Compose, &[Key::ch('i')], &table), Some(Action::EditField));
+        assert_eq!(resolve(Ctx::Compose, &[Key::enter()], &table), Some(Action::EditField));
+        // Account edit form.
+        assert_eq!(
+            resolve(Ctx::SettingsForm, &[Key::ch('i')], &table),
+            Some(Action::EditField)
+        );
+        assert_eq!(
+            resolve(Ctx::SettingsForm, &[Key::ch('l')], &table),
+            Some(Action::FocusRight)
+        );
+        // Account list.
+        assert_eq!(resolve(Ctx::Settings, &[Key::ch('o')], &table), Some(Action::OpenAccount));
+        assert_eq!(resolve(Ctx::Settings, &[Key::ch('a')], &table), Some(Action::AddAccount));
+        assert_eq!(resolve(Ctx::Settings, &[Key::ch('d')], &table), Some(Action::DeleteAccount));
+        assert_eq!(
+            resolve(Ctx::Settings, &[Key::ch('x')], &table),
+            Some(Action::SetDefaultAccount)
+        );
+    }
+
+    #[test]
+    fn form_edit_key_is_remappable() {
+        // The whole point of the refactor: the form-edit key is configurable.
+        let mut kb: KeyBindings = HashMap::new();
+        let mut compose = HashMap::new();
+        compose.insert("edit_field".into(), KeySpecs::One("e".into()));
+        kb.insert("compose".into(), compose);
+        let mut form = HashMap::new();
+        form.insert("edit_field".into(), KeySpecs::One("a".into()));
+        kb.insert("account_form".into(), form);
+        let table = build_table(&kb);
+
+        // Compose: 'e' now edits; the default 'i' is gone.
+        assert_eq!(resolve(Ctx::Compose, &[Key::ch('e')], &table), Some(Action::EditField));
+        assert_ne!(resolve(Ctx::Compose, &[Key::ch('i')], &table), Some(Action::EditField));
+        // Account form (section alias `account_form`): 'a' now edits.
+        assert_eq!(
+            resolve(Ctx::SettingsForm, &[Key::ch('a')], &table),
+            Some(Action::EditField)
+        );
     }
 
     #[test]

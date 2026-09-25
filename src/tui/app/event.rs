@@ -160,9 +160,24 @@ pub enum Action {
     MoveLast,
     FocusNext,
     FocusPrev,
+    /// Directional focus movement within a form's field grid (compose headers,
+    /// account edit form). Distinct from list `MoveUp`/`MoveDown` so forms can be
+    /// rebound independently.
+    FocusUp,
+    FocusDown,
+    FocusLeft,
+    FocusRight,
+    /// Start editing / activate the focused form field (text field -> type,
+    /// compose body -> $EDITOR, provider -> chooser, toggle/button -> act).
+    EditField,
     ExpandFolder,
     CollapseFolder,
     FilterAccounts,
+    /// Account manager list actions (focus == Accounts).
+    OpenAccount,
+    AddAccount,
+    DeleteAccount,
+    SetDefaultAccount,
 
     // Reader scrolling
     ScrollUp,

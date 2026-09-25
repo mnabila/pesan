@@ -600,7 +600,7 @@ async fn help_and_key_handling() {
     send_key!(app2, Key::ch('a'));
     send_key!(app2, Key::enter());
     send_key!(app2, Key::ch('j'));
-    send_key!(app2, Key::ch('e'));
+    send_key!(app2, Key::ch('i'));
     assert!(app2.settings.as_ref().unwrap().field_editing);
     send_key!(app2, Key::ch('?'));
     assert!(!app2.help_open);

@@ -317,6 +317,20 @@ impl App {
 
             // Accounts
 
+            // Form-local actions (compose fields, account-form field navigation,
+            // account list). These are dispatched directly by the form key
+            // handlers in `keys_forms.rs`, never routed through this global
+            // `action()`, so they are no-ops here.
+            Action::FocusUp
+            | Action::FocusDown
+            | Action::FocusLeft
+            | Action::FocusRight
+            | Action::EditField
+            | Action::OpenAccount
+            | Action::AddAccount
+            | Action::DeleteAccount
+            | Action::SetDefaultAccount => {}
+
             // Confirm dialog
             Action::ConfirmYes => self.confirm_yes().await,
             Action::ConfirmNo => self.confirm = None,

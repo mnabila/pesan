@@ -96,76 +96,58 @@ impl App {
         }
     }
 
-    /// Navigation mode: j/k move rows, Shift+J/K and arrows scroll the body,
-    /// e/Enter edit the focused field or open $EDITOR on the body.
+    /// Navigation mode, fully table-driven against the `Compose` keymap: move
+    /// field focus, scroll the body when it is focused, or start editing the
+    /// focused field / open $EDITOR on the body. Send / draft / discard / editor
+    /// / help are consumed earlier in [`Self::compose_key`].
     async fn compose_nav_key(&mut self, key: &Key, focus: ComposeFocus) {
-        match key.code {
-            KeyCode::Esc => return self.action(Action::DiscardDraft).await,
-            // `?` opens the keymap overlay (compose keys + global column). Only in
-            // nav mode - while editing a field it is a literal character.
-            KeyCode::Char('?') => return self.action(Action::Help).await,
-            KeyCode::Char('j') => {
-                if let Some(c) = &mut self.compose {
-                    c.focus = c.focus.grid_step('j');
-                }
-            }
-            KeyCode::Char('k') => {
-                if let Some(c) = &mut self.compose {
-                    c.focus = c.focus.grid_step('k');
-                }
-            }
-            KeyCode::Char('h') | KeyCode::Left => {
-                if let Some(c) = &mut self.compose {
-                    c.focus = c.focus.grid_step('h');
-                }
-            }
-            KeyCode::Char('l') | KeyCode::Right => {
-                if let Some(c) = &mut self.compose {
-                    c.focus = c.focus.grid_step('l');
-                }
-            }
-            // Body row: e/Enter open the editor; J/K (Shift) and arrows scroll.
-            KeyCode::Char('e') | KeyCode::Enter if focus == ComposeFocus::Body => {
-                self.action(Action::ExternalEditor).await
-            }
-            KeyCode::Char('J') | KeyCode::Down if focus == ComposeFocus::Body => {
-                self.scroll_compose_body(1)
-            }
-            KeyCode::Char('K') | KeyCode::Up if focus == ComposeFocus::Body => {
-                self.scroll_compose_body(-1)
-            }
-            KeyCode::PageDown if focus == ComposeFocus::Body => self.scroll_compose_body(10),
-            KeyCode::PageUp if focus == ComposeFocus::Body => self.scroll_compose_body(-10),
-            KeyCode::Char('g') | KeyCode::Home if focus == ComposeFocus::Body => {
-                if let Some(c) = &mut self.compose {
-                    c.body_scroll = 0;
-                }
-            }
-            KeyCode::Char('G') | KeyCode::End if focus == ComposeFocus::Body => {
-                if let Some(c) = &mut self.compose {
-                    c.body_scroll = c.body.lines().count().saturating_sub(1);
-                }
-            }
-            // Header/attach rows: arrows also move; e/Enter start editing.
-            KeyCode::Down => {
-                if let Some(c) = &mut self.compose {
-                    c.focus = c.focus.grid_step('j');
-                }
-            }
-            KeyCode::Up => {
-                if let Some(c) = &mut self.compose {
-                    c.focus = c.focus.grid_step('k');
-                }
-            }
-            KeyCode::Char('e') | KeyCode::Enter => {
-                if let Some(c) = &mut self.compose {
+        let Some(action) = crate::tui::keymap::resolve_in_ctx(
+            crate::tui::keymap::Ctx::Compose,
+            &[*key],
+            &self.keymap_table,
+        ) else {
+            return;
+        };
+        match action {
+            Action::FocusDown | Action::FocusNext => self.compose_focus_step('j'),
+            Action::FocusUp | Action::FocusPrev => self.compose_focus_step('k'),
+            Action::FocusLeft => self.compose_focus_step('h'),
+            Action::FocusRight => self.compose_focus_step('l'),
+            // On the body row, edit means "open $EDITOR"; on a header/attach row
+            // it drops into the inline field editor.
+            Action::EditField => {
+                if focus == ComposeFocus::Body {
+                    self.action(Action::ExternalEditor).await;
+                } else if let Some(c) = &mut self.compose {
                     c.editing = true;
                     if let Some(input) = c.focused_input_mut() {
                         input.focus(true);
                     }
                 }
             }
+            // Body scrolling: only meaningful while the body row is focused.
+            Action::ScrollDown if focus == ComposeFocus::Body => self.scroll_compose_body(1),
+            Action::ScrollUp if focus == ComposeFocus::Body => self.scroll_compose_body(-1),
+            Action::PageDown if focus == ComposeFocus::Body => self.scroll_compose_body(10),
+            Action::PageUp if focus == ComposeFocus::Body => self.scroll_compose_body(-10),
+            Action::ScrollStart if focus == ComposeFocus::Body => {
+                if let Some(c) = &mut self.compose {
+                    c.body_scroll = 0;
+                }
+            }
+            Action::ScrollEnd if focus == ComposeFocus::Body => {
+                if let Some(c) = &mut self.compose {
+                    c.body_scroll = c.body.lines().count().saturating_sub(1);
+                }
+            }
             _ => {}
+        }
+    }
+
+    /// Move compose field focus one grid step (`h`/`j`/`k`/`l`).
+    fn compose_focus_step(&mut self, dir: char) {
+        if let Some(c) = &mut self.compose {
+            c.focus = c.focus.grid_step(dir);
         }
     }
 
@@ -341,27 +323,42 @@ impl App {
             return;
         }
 
-        // Field navigation: Esc exits the form; j/k move; Enter edits/acts.
-        if key.code == KeyCode::Esc {
-            if let Some(s) = &mut self.settings {
-                s.editing = false;
-                s.focus = SettingsFocus::Accounts;
-            }
+        // Field navigation is table-driven against the `SettingsForm` keymap, so
+        // every key here is user-rebindable (see `keymap/table.rs`).
+        let Some(action) = crate::tui::keymap::resolve_in_ctx(
+            crate::tui::keymap::Ctx::SettingsForm,
+            &[*key],
+            &self.keymap_table,
+        ) else {
             return;
-        }
-
-        match key.code {
-            KeyCode::Char('j') | KeyCode::Down => return self.cycle_settings_focus(1),
-            KeyCode::Char('k') | KeyCode::Up => return self.cycle_settings_focus(-1),
-            // `h`/`l` move focus left/right within the 2-column form grid.
-            KeyCode::Char('h') | KeyCode::Left => return self.settings_focus_horizontal(-1),
-            KeyCode::Char('l') | KeyCode::Right => return self.settings_focus_horizontal(1),
+        };
+        match action {
+            // Esc / close leaves the form back to the account list.
+            Action::CloseSettings => {
+                if let Some(s) = &mut self.settings {
+                    s.editing = false;
+                    s.focus = SettingsFocus::Accounts;
+                }
+            }
+            Action::FocusDown | Action::FocusNext => self.cycle_settings_focus(1),
+            Action::FocusUp | Action::FocusPrev => self.cycle_settings_focus(-1),
+            Action::FocusRight => self.settings_focus_horizontal(1),
+            Action::FocusLeft => self.settings_focus_horizontal(-1),
+            Action::EditField => self.settings_activate_field(focus, text_field).await,
+            // A remap that puts save in the form section resolves here; the plain
+            // `W` is already handled by `settings_key` before this point.
+            Action::SaveSettings => self.save_settings().await,
             _ => {}
         }
+    }
+
+    /// Activate the focused account-form field: text fields drop into the inline
+    /// editor; the provider row opens the chooser; the default toggle flips; the
+    /// authorize / save buttons run their action.
+    async fn settings_activate_field(&mut self, focus: Option<SettingsFocus>, text_field: bool) {
         match focus {
             Some(SettingsFocus::Name | SettingsFocus::Email | SettingsFocus::Password) => {
-                if matches!(key.code, KeyCode::Enter | KeyCode::Char('e'))
-                    && text_field
+                if text_field
                     && let Some(s) = &mut self.settings
                 {
                     s.field_editing = true;
@@ -381,13 +378,8 @@ impl App {
             Some(SettingsFocus::Provider) => {
                 // Editing an existing account: switch providers through the same
                 // chooser the new-account wizard uses (clearer than a tiny inline
-                // dropdown). Enter/Space/`o` open it; h/l move focus like any field.
-                let open = matches!(
-                    key.code,
-                    KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Char('o')
-                );
-                if open
-                    && let Some(s) = &mut self.settings
+                // dropdown).
+                if let Some(s) = &mut self.settings
                     && let Some(form) = s.form.as_mut()
                 {
                     s.choose_idx = form.provider_idx;
@@ -396,47 +388,45 @@ impl App {
                 }
             }
             Some(SettingsFocus::IsDefault) => {
-                if (key.code == KeyCode::Enter || key.code == KeyCode::Char(' '))
-                    && let Some(s) = &mut self.settings
+                if let Some(s) = &mut self.settings
                     && let Some(form) = s.form.as_mut()
                 {
                     form.is_default = !form.is_default;
                 }
             }
-            Some(SettingsFocus::Authorize) => {
-                if key.code == KeyCode::Enter || key.code == KeyCode::Char(' ') {
-                    self.request_authorize();
-                }
-            }
-            Some(SettingsFocus::Save)
-                if key.code == KeyCode::Enter || key.code == KeyCode::Char(' ') =>
-            {
-                self.save_password_account().await;
-            }
+            Some(SettingsFocus::Authorize) => self.request_authorize(),
+            Some(SettingsFocus::Save) => self.save_password_account().await,
             _ => {}
         }
     }
 
-    /// Account-list navigation: j/k move the selection, e/a/d/x/`/` act on the
-    /// highlighted account. UI preferences now live in `config.yaml`.
+    /// Account-list navigation, table-driven against the `Settings` keymap: move
+    /// the selection or act on the highlighted account (open / add / delete / set
+    /// default / filter). Save / close / help are consumed earlier in
+    /// [`Self::settings_key`].
     async fn settings_nav_key(&mut self, key: &Key, _focus: Option<SettingsFocus>) {
-        match key.code {
-            KeyCode::Up | KeyCode::Char('k') => self.settings_move(-1),
-            KeyCode::Down | KeyCode::Char('j') => self.settings_move(1),
-            // `o` opens the selected account (its form doubles as the detail view);
-            // Esc exits. `a` adds a new account.
-            KeyCode::Char('o') => self.begin_edit_account(false),
-            KeyCode::Char('a') => self.begin_add_account(),
-            KeyCode::Char('/') => {
+        let Some(action) = crate::tui::keymap::resolve_in_ctx(
+            crate::tui::keymap::Ctx::Settings,
+            &[*key],
+            &self.keymap_table,
+        ) else {
+            return;
+        };
+        match action {
+            Action::MoveUp => self.settings_move(-1),
+            Action::MoveDown => self.settings_move(1),
+            Action::OpenAccount => self.begin_edit_account(false),
+            Action::AddAccount => self.begin_add_account(),
+            Action::FilterAccounts => {
                 if let Some(s) = &mut self.settings {
                     s.filtering = true;
                 }
             }
-            KeyCode::Char('d') if !key.ctrl => {
+            Action::DeleteAccount => {
                 let idx = self.settings.as_ref().map(|s| s.selected).unwrap_or(0);
                 self.request_delete_account(idx);
             }
-            KeyCode::Char('x') => {
+            Action::SetDefaultAccount => {
                 let idx = self.settings.as_ref().map(|s| s.selected).unwrap_or(0);
                 self.toggle_default_account(idx).await;
             }

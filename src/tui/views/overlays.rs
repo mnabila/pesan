@@ -11,9 +11,12 @@ pub(super) fn render_help(frame: &mut Frame, app: &App) {
     // rather than filling the screen. Global has no second column.
     let mut left: Vec<Line> = Vec::new();
     if active_ctx == Ctx::Settings {
-        // The account-manager keys are dispatched directly (not via the keymap
-        // table), so its help is a curated list rather than a table read-out.
-        push_settings_help(&mut left, app);
+        // Account manager: the list keys and the edit-form keys are separate
+        // keymap contexts. Show both, read straight from the active table so the
+        // help always reflects the user's remaps.
+        push_help_section(&mut left, app, Ctx::Settings, "account list");
+        left.push(Line::raw(""));
+        push_help_section(&mut left, app, Ctx::SettingsForm, "account form");
     } else {
         push_help_section(&mut left, app, active_ctx, help_ctx_name(active_ctx));
     }
@@ -88,6 +91,7 @@ pub(super) fn help_ctx_name(ctx: Ctx) -> &'static str {
         Ctx::Reader => "reader",
         Ctx::Compose => "compose",
         Ctx::Settings => "settings",
+        Ctx::SettingsForm => "account form",
         Ctx::Search => "search",
         Ctx::Confirm => "confirm",
     }
@@ -104,42 +108,6 @@ pub(super) fn push_help_section(lines: &mut Vec<Line<'static>>, app: &App, ctx: 
         let line_text = format!("   {keys:<12} {}", row.desc);
         lines.push(Line::from(Span::styled(line_text, app.theme.fg_style())));
     }
-}
-
-/// Curated help for the account manager. Its keys are handled directly in
-/// `App::settings_key` (not through the keymap table), so they are listed here by
-/// hand, split into the account-list and the account-form modes.
-pub(super) fn push_settings_help(lines: &mut Vec<Line<'static>>, app: &App) {
-    let title = |lines: &mut Vec<Line<'static>>, text: &str| {
-        lines.push(Line::from(Span::styled(
-            format!(" {text} "),
-            app.theme.accent_style().add_modifier(Modifier::BOLD),
-        )));
-    };
-    let row = |lines: &mut Vec<Line<'static>>, keys: &str, desc: &str| {
-        lines.push(Line::from(Span::styled(
-            format!("   {keys:<12} {desc}"),
-            app.theme.fg_style(),
-        )));
-    };
-
-    title(lines, "account list");
-    row(lines, "o", "open / edit account");
-    row(lines, "a", "add account");
-    row(lines, "d", "delete account");
-    row(lines, "x", "set as default");
-    row(lines, "/", "filter accounts");
-    row(lines, "j / k", "move selection");
-    row(lines, "W", "save changes");
-
-    lines.push(Line::raw(""));
-    title(lines, "account form");
-    row(lines, "j / k", "move field (down/up)");
-    row(lines, "h / l", "move field (left/right)");
-    row(lines, "e / Enter", "edit field");
-    row(lines, "Space", "toggle default");
-    row(lines, "Enter", "authorize / save");
-    row(lines, "Esc", "cancel field / back");
 }
 
 pub(super) fn ctx_from_pane(pane: Pane) -> Ctx {

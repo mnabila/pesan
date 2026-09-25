@@ -233,7 +233,7 @@ fn render(frame: &mut Frame, body: Rect, p: ComposeProps, skin: &Skin) {
     );
     let (body_text, body_style) = if p.body.trim().is_empty() {
         (
-            "(empty - press e to edit in $EDITOR)".to_string(),
+            "(empty - press i to edit in $EDITOR)".to_string(),
             skin.theme.dim_style(),
         )
     } else {
