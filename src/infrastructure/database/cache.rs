@@ -1,4 +1,5 @@
 use anyhow::Result;
+use sqlx::AssertSqlSafe;
 use sqlx::Row;
 use sqlx::sqlite::SqliteRow;
 
@@ -134,7 +135,7 @@ pub async fn load_envelopes(db: &Db, account_id: &str, folder: &str) -> Result<V
         "SELECT {ENVELOPE_COLS} FROM messages \
          WHERE account_id = ? AND folder = ? ORDER BY date DESC"
     );
-    let rows = sqlx::query(&sql)
+    let rows = sqlx::query(AssertSqlSafe(sql))
         .bind(account_id)
         .bind(folder)
         .fetch_all(db)
@@ -196,7 +197,7 @@ pub async fn load_message(
         "SELECT {ENVELOPE_COLS} FROM messages \
          WHERE account_id = ? AND folder = ? AND uid = ?"
     );
-    let row = sqlx::query(&sql)
+    let row = sqlx::query(AssertSqlSafe(sql))
         .bind(account_id)
         .bind(folder)
         .bind(uid as i64)
@@ -313,7 +314,7 @@ pub async fn search(db: &Db, account_id: &str, folder: &str, query: &str) -> Res
            AND rowid IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?) \
          ORDER BY date DESC LIMIT 500"
     );
-    let rows = sqlx::query(&sql)
+    let rows = sqlx::query(AssertSqlSafe(sql))
         .bind(account_id)
         .bind(folder)
         .bind(fts)

@@ -1,4 +1,5 @@
 use anyhow::Result;
+use sqlx::AssertSqlSafe;
 
 pub use crate::application::account::Account;
 use crate::application::ports::AccountRepo;
@@ -8,14 +9,16 @@ const COLS: &str = "id, name, email, provider, keychain_ref, is_default, created
 
 pub async fn list(db: &Db) -> Result<Vec<Account>> {
     let sql = format!("SELECT {COLS} FROM accounts ORDER BY is_default DESC, name");
-    let accounts = sqlx::query_as::<_, Account>(&sql).fetch_all(db).await?;
+    let accounts = sqlx::query_as::<_, Account>(AssertSqlSafe(sql))
+        .fetch_all(db)
+        .await?;
     Ok(accounts)
 }
 
 #[allow(dead_code)] // test-only
 pub async fn get(db: &Db, id: &str) -> Result<Option<Account>> {
     let sql = format!("SELECT {COLS} FROM accounts WHERE id = ?");
-    let account = sqlx::query_as::<_, Account>(&sql)
+    let account = sqlx::query_as::<_, Account>(AssertSqlSafe(sql))
         .bind(id)
         .fetch_optional(db)
         .await?;
@@ -24,7 +27,7 @@ pub async fn get(db: &Db, id: &str) -> Result<Option<Account>> {
 
 pub async fn get_by_name(db: &Db, name: &str) -> Result<Option<Account>> {
     let sql = format!("SELECT {COLS} FROM accounts WHERE name = ?");
-    let account = sqlx::query_as::<_, Account>(&sql)
+    let account = sqlx::query_as::<_, Account>(AssertSqlSafe(sql))
         .bind(name)
         .fetch_optional(db)
         .await?;
