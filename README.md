@@ -4,6 +4,8 @@ A fast, keyboard-driven terminal email client. `pesan` reads over IMAP and sends
 
 - **Offline-first** - mail is cached in SQLite; the UI shows cached content immediately, then syncs live in the background.
 - **Push new mail** - IMAP IDLE (with a polling fallback) plus desktop notifications.
+- **Interoperable on-disk copy** - message bodies are mirrored to a standard Maildir tree, so tools like `mutt` and `mbsync` can read the same mail.
+- **Optional background daemon** - run `pesan daemon` (e.g. under `systemd --user`) to keep mail syncing and notifications firing even when the TUI is closed; the TUI uses it automatically when present and connects directly otherwise.
 - **Secure by default** - only refresh tokens are stored, and they live in your OS keyring, never on disk in plaintext.
 - **Configurable** - YAML config for providers, layout, themes, notifications, and key bindings.
 
@@ -48,15 +50,13 @@ cargo run
 
 ### Commands
 
-Running `pesan` with no command opens the interactive TUI. A few read-only subcommands are available for scripting and quick checks:
+Running `pesan` with no command opens the interactive TUI. A couple of subcommands are available:
 
 ```bash
-pesan                    # launch the interactive TUI (default)
-pesan version            # print the version and exit
-pesan account list       # list configured accounts (name, email, provider, default, authorized)
-pesan account info       # details for the default account
-pesan account info NAME  # details for a specific account
-pesan help               # usage
+pesan            # launch the interactive TUI (default)
+pesan daemon     # run the mail server in the foreground (see "Background daemon")
+pesan version    # print the version and exit
+pesan help       # usage
 ```
 
 ---
@@ -390,6 +390,23 @@ Press **`?`** anytime for a context-aware help overlay. Defaults:
 
 ---
 
+## Background daemon
+
+`pesan daemon` runs the mail server in the foreground. It owns all IMAP/SMTP sessions, keeps the local cache warm, raises desktop notifications on new mail, and serves the TUI over a unix socket. Running it is **optional**: when a daemon is present the TUI routes mail operations through it; when it is not, the TUI connects to IMAP directly (so it works standalone). The value of the daemon is that syncing and notifications keep running even while the TUI is closed.
+
+The daemon logs to stdout and stops cleanly on `SIGTERM` / `Ctrl-C`, so it runs well under `systemd --user`. A ready-made unit lives in [`contrib/pesan.service`](contrib/pesan.service):
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp contrib/pesan.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now pesan.service
+loginctl enable-linger "$USER"     # optional: keep running after logout
+journalctl --user -u pesan -f      # follow the logs
+```
+
+---
+
 ## File locations
 
 Paths follow platform conventions (via the `directories` crate). On Linux:
@@ -397,8 +414,11 @@ Paths follow platform conventions (via the `directories` crate). On Linux:
 | What | Path |
 |------|------|
 | Config | `~/.config/pesan/config.yaml` |
+| Config drop-ins | `~/.config/pesan/config.d/*.yaml` |
 | Local cache DB | `~/.local/share/pesan/pesan.db` |
+| Maildir (on-disk bodies) | `~/.local/share/pesan/maildir/<account>/<folder>/{tmp,new,cur}` |
 | Logs | `~/.local/share/pesan/logs/pesan.log` |
+| Daemon socket | `$XDG_RUNTIME_DIR/pesan/daemon.sock` (falls back to the data dir) |
 | Tokens | OS keyring (service `pesan`), or the `secrets` table in `pesan.db` if no keyring |
 
 macOS and Windows use their respective app-directory conventions.
