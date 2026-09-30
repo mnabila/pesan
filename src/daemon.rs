@@ -16,17 +16,22 @@ use std::collections::HashMap;
 use anyhow::Result;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
-use crate::application::MailSource;
-use crate::application::Services;
-use crate::application::account::connect::connect_account;
-use crate::application::account::connect_params::resolve_connect_params;
-use crate::application::mail::imap_cmd::ImapHandle;
-use crate::bootstrap::config::Config;
-use crate::domain::{Envelope, MailUpdate, NewMail};
-use crate::infrastructure::database::accounts::Account;
-use crate::infrastructure::mail::ipc::PushEvent;
-use crate::infrastructure::{self, database};
-use crate::shared::is_today;
+use crate::mail::MailSource;
+use crate::wiring::Services;
+use crate::wiring::connect::{connect_account, now_ts};
+use crate::account::application::connect_params::resolve_connect_params;
+use crate::account::infrastructure::accounts;
+use crate::mail::application::imap_cmd::ImapHandle;
+use crate::mail::application::ports;
+use crate::mail::application::prefetch::today_uids;
+use crate::platform::config::Config;
+use crate::platform::{boot, config, logging};
+use crate::account::Account;
+use crate::mail::{Envelope, MailUpdate, NewMail};
+use crate::mail::infrastructure::ipc::PushEvent;
+use crate::mail::infrastructure::ipc::server;
+use crate::platform::db as database;
+use crate::wiring;
 
 /// A new-mail batch tagged with the account + folder it arrived on, so the loop
 /// can file it under the right cache key (the domain `NewMail` carries neither).
@@ -45,11 +50,19 @@ enum HubMsg {
     },
 }
 
+/// `pesan daemon` entry point: bootstrap the process (logging mirrored to stdout
+/// for journald), then drive the auto-fetch loop until shutdown.
+pub fn start() -> Result<()> {
+    let boot = boot::boot(logging::LogMode::FileAndStdout)?;
+    tracing::info!("daemon: starting");
+    boot.runtime.block_on(run(boot.config, boot.pool))
+}
+
 /// Run the daemon until a shutdown signal (SIGTERM / Ctrl-C) arrives. The owner
 /// task holds every IMAP session and is aborted on shutdown, dropping the
 /// sessions/watchers; the socket server dies with the process.
 pub async fn run(config: Config, pool: database::Db) -> Result<()> {
-    let services = infrastructure::sqlite_services(pool.clone());
+    let services = wiring::sqlite_services(pool.clone());
     let (req_tx, req_rx) = mpsc::unbounded_channel::<HubMsg>();
     let (pushes, _keepalive) = broadcast::channel::<PushEvent>(PUSH_CAP);
 
@@ -76,7 +89,7 @@ fn start_ipc_server(req_tx: mpsc::UnboundedSender<HubMsg>, pushes: broadcast::Se
     use std::os::unix::fs::PermissionsExt;
     use std::sync::Arc;
 
-    let sock = match crate::bootstrap::config::socket_path() {
+    let sock = match config::socket_path() {
         Ok(p) => p,
         Err(e) => {
             tracing::warn!("daemon: no socket path ({e}); running without client server");
@@ -104,8 +117,8 @@ fn start_ipc_server(req_tx: mpsc::UnboundedSender<HubMsg>, pushes: broadcast::Se
     let _ = std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600));
     tracing::info!("daemon: IPC server listening on {}", sock.display());
 
-    let hub: Arc<dyn infrastructure::mail::ipc::server::Sessions> = Arc::new(Hub { req_tx, pushes });
-    tokio::spawn(infrastructure::mail::ipc::server::serve(listener, hub));
+    let hub: Arc<dyn server::Sessions> = Arc::new(Hub { req_tx, pushes });
+    tokio::spawn(server::serve(listener, hub));
 }
 
 /// A finished connect attempt, sent from a per-account connect task back to the
@@ -120,7 +133,7 @@ struct ConnectOutcome {
 
 struct ConnectSpoils {
     source: Box<dyn MailSource>,
-    watchers: Vec<Box<dyn crate::application::ports::WatchHandle>>,
+    watchers: Vec<Box<dyn ports::WatchHandle>>,
     handle: Option<ImapHandle>,
 }
 
@@ -149,7 +162,7 @@ async fn owner_task(
     let (lost_tx, mut lost_rx) = mpsc::unbounded_channel::<String>();
     let mut sources: HashMap<String, Box<dyn MailSource>> = HashMap::new();
     let mut names: HashMap<String, String> = HashMap::new();
-    let mut watch_handles: Vec<Box<dyn crate::application::ports::WatchHandle>> = Vec::new();
+    let mut watch_handles: Vec<Box<dyn ports::WatchHandle>> = Vec::new();
     // Accounts with a connect task in flight, and the handle requests waiting on
     // each - so N clients asking for the same account share one connect.
     let mut connecting: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -167,7 +180,7 @@ async fn owner_task(
     let mut retry_iv = tokio::time::interval(poll.max(std::time::Duration::from_secs(60)));
 
     // Eager startup: fire every in-scope account's connect at once (parallel).
-    let accounts = database::accounts::list(&pool).await.unwrap_or_default();
+    let accounts = accounts::list(&pool).await.unwrap_or_default();
     let want: Vec<Account> = accounts
         .into_iter()
         .filter(|a| a.id.is_some() && config.daemon.includes(&a.name))
@@ -185,7 +198,7 @@ async fn owner_task(
             Some(msg) = req_rx.recv() => match msg {
                 HubMsg::Handle { account, reply } => {
                     // Fast path: already connected.
-                    let hit = database::accounts::get_by_name(&pool, &account).await;
+                    let hit = accounts::get_by_name(&pool, &account).await;
                     match hit {
                         Ok(Some(acct)) => {
                             let Some(id) = acct.id.clone() else {
@@ -283,7 +296,7 @@ async fn owner_task(
                 }
             }
             _ = retry_iv.tick() => {
-                let accts = database::accounts::list(&pool).await.unwrap_or_default();
+                let accts = accounts::list(&pool).await.unwrap_or_default();
                 for account in accts
                     .into_iter()
                     .filter(|a| a.id.is_some() && config.daemon.includes(&a.name))
@@ -347,9 +360,17 @@ async fn do_connect(
     arrivals_tx: &mpsc::UnboundedSender<Arrival>,
     lost_tx: &mpsc::UnboundedSender<String>,
 ) -> Result<ConnectSpoils, String> {
-    let params = match resolve_connect_params(config, account, services.tokens.as_ref()).await {
+    let provider = config
+        .provider_spec(&account.provider)
+        .map_err(|e| format!("account '{}' config error: {e:#}", account.name))?;
+    let params = match resolve_connect_params(&provider, account, services.tokens.as_ref()).await {
         Ok(Some(p)) => p,
-        Ok(None) => return Err(format!("account '{}' not authorized; skipping", account.name)),
+        Ok(None) => {
+            return Err(format!(
+                "account '{}' not authorized; skipping",
+                account.name
+            ));
+        }
         Err(e) => return Err(format!("account '{}' config error: {e:#}", account.name)),
     };
     let want = folders.first().cloned().unwrap_or_else(|| "INBOX".to_string());
@@ -381,7 +402,8 @@ async fn do_connect(
     if let Some(h) = &handle {
         for folder in folders {
             let envs = services.cache.load_envelopes(id, folder).await.unwrap_or_default();
-            prefetch_bodies(services, h, id, folder, today_uids(&envs, cap)).await;
+            let uids = today_uids(&envs, cap, now_ts());
+            prefetch_bodies(services, h, id, folder, uids).await;
         }
     }
 
@@ -474,7 +496,7 @@ struct Hub {
 }
 
 #[async_trait::async_trait]
-impl infrastructure::mail::ipc::server::Sessions for Hub {
+impl server::Sessions for Hub {
     async fn handle(&self, account: &str) -> Result<ImapHandle, String> {
         let (tx, rx) = oneshot::channel();
         self.req_tx
@@ -488,25 +510,11 @@ impl infrastructure::mail::ipc::server::Sessions for Hub {
     }
 }
 
-/// UIDs of today's messages (newest-first as stored), capped. Empty when the cap
-/// is zero (prefetch disabled).
-fn today_uids(envelopes: &[Envelope], cap: usize) -> Vec<u64> {
-    if cap == 0 {
-        return Vec::new();
-    }
-    envelopes
-        .iter()
-        .filter(|e| is_today(e.date))
-        .take(cap)
-        .map(|e| e.uid)
-        .collect()
-}
-
 /// Warm the body cache for `uids` in `folder`. Skips anything already fully
 /// cached (body + headers); best-effort, errors are logged at debug and ignored.
 /// Mirrors the TUI's `Effect::PrefetchBodies` handler.
 async fn prefetch_bodies(
-    services: &crate::application::Services,
+    services: &wiring::Services,
     handle: &ImapHandle,
     account_id: &str,
     folder: &str,
@@ -536,7 +544,7 @@ async fn prefetch_bodies(
 /// the `notifications` settings.
 fn notify(
     config: &Config,
-    services: &crate::application::Services,
+    services: &wiring::Services,
     account: &str,
     envelopes: &[Envelope],
 ) {
@@ -582,7 +590,7 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::window_changed;
-    use crate::domain::{Address, Envelope, Flags};
+    use crate::mail::{Address, Envelope, Flags};
 
     fn env(uid: u64, seen: bool) -> Envelope {
         Envelope {
