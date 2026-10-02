@@ -131,6 +131,14 @@ pub struct PendingExternalEditor {
     pub editor_cmd: Option<String>,
 }
 
+/// Ready for the event loop to suspend the terminal and run the configured
+/// external file picker (yazi/lf/ranger). The picker writes the selected file
+/// path to a temp file; the event loop reads it back and adds it as an
+/// attachment.
+pub struct PendingFilePicker {
+    pub picker_cmd: String,
+}
+
 /// A queued OAuth authorization. The event loop opens the (blocking) browser
 /// consent, then - after the user pastes the redirect URL - calls
 /// [`App::apply_oauth_result`] to persist the refresh token and upsert `account`.
@@ -247,6 +255,7 @@ pub struct App {
     /// the newest overwriting the rest.
     pub toasts: Vec<Toast>,
     pub pending_external: Option<PendingExternalEditor>,
+    pub pending_file_picker: Option<PendingFilePicker>,
     pub pending_oauth: Option<PendingOAuth>,
     /// An opened consent waiting for the user to paste the redirect URL back.
     /// Set by the event loop after it opens the browser; drives the paste
@@ -362,6 +371,7 @@ impl App {
             confirm: None,
             toasts: Vec::new(),
             pending_external: None,
+            pending_file_picker: None,
             pending_oauth: None,
             oauth_paste: None,
             oauth_submit: None,

@@ -213,6 +213,11 @@ pub enum Action {
     SaveDraft,
     DiscardDraft,
     ExternalEditor,
+    /// Open the configured external file picker (yazi/lf/ranger) to choose an
+    /// attachment path. Only meaningful in the compose screen.
+    FilePicker,
+    /// Drop the most recently added attachment. Only meaningful in compose.
+    RemoveAttachment,
     OpenAttachment,
     /// Render the message to /tmp/pesan/*.html and open it in the browser.
     OpenInBrowser,

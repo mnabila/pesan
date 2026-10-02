@@ -318,6 +318,8 @@ static BINDINGS: &[Binding] = &[
     b(Ctx::Compose, &[Key::page_up()], Action::PageUp, "PgUp", "body page up"),
     b(Ctx::Compose, &[Key::page_down()], Action::PageDown, "PgDn", "body page down"),
     b(Ctx::Compose, &[Key::cc('e')], Action::ExternalEditor, "Ctrl-e", "edit body in $EDITOR"),
+    b(Ctx::Compose, &[Key::cc('f')], Action::FilePicker, "Ctrl-f", "pick attachment file"),
+    b(Ctx::Compose, &[Key::cc('x')], Action::RemoveAttachment, "Ctrl-x", "remove last attachment"),
     b(Ctx::Compose, &[Key::cc('s')], Action::Send, "Ctrl-s", "send"),
     b(Ctx::Compose, &[Key::cc('d')], Action::SaveDraft, "Ctrl-d", "save draft"),
     b(Ctx::Compose, &[Key::esc()], Action::DiscardDraft, "Esc", "discard"),

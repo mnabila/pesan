@@ -12,8 +12,9 @@ pub enum ComposeMode {
 }
 
 /// Which compose field currently has keyboard focus. Tab/Shift-Tab cycle
-/// through these; the header fields and `Attach` are inline `TextInput`s while
-/// `Body` is a preview row that opens `$EDITOR`.
+/// through these; the header fields are inline `TextInput`s while `Body` is a
+/// preview row that opens `$EDITOR`. Attachments are added via the Ctrl-f file
+/// picker, so there is no inline attach field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComposeFocus {
     To,
@@ -21,19 +22,17 @@ pub enum ComposeFocus {
     Bcc,
     ReplyTo,
     Subject,
-    Attach,
     Body,
 }
 
 impl ComposeFocus {
     /// Focus order, top to bottom, wrapping.
-    const ORDER: [ComposeFocus; 7] = [
+    const ORDER: [ComposeFocus; 6] = [
         ComposeFocus::To,
         ComposeFocus::Cc,
         ComposeFocus::Bcc,
         ComposeFocus::ReplyTo,
         ComposeFocus::Subject,
-        ComposeFocus::Attach,
         ComposeFocus::Body,
     ];
 
@@ -49,46 +48,21 @@ impl ComposeFocus {
         Self::ORDER[(self.index() + Self::ORDER.len() - 1) % Self::ORDER.len()]
     }
 
-    /// Grid-aware movement matching the 2-column compose layout. `dir` is one of
-    /// 'h' (left), 'j' (down), 'k' (up), 'l' (right). The six header/attach
-    /// fields form a 3x2 grid; `Body` sits below it. Used so h/j/k/l walk the
-    /// grid the way it is drawn.
+    /// Single-column movement matching the compose layout. `dir` is 'j' (down)
+    /// or 'k' (up); 'h'/'l' are no-ops. The layout is:
+    ///
+    /// ```text
+    /// To
+    /// Cc
+    /// Bcc
+    /// Reply-To
+    /// Subject
+    /// Body
+    /// ```
     pub(crate) fn grid_step(self, dir: char) -> Self {
-        if self == ComposeFocus::Body {
-            // Leaving the body upward returns to the bottom-right cell.
-            return match dir {
-                'k' => ComposeFocus::Attach,
-                _ => ComposeFocus::Body,
-            };
-        }
-        let (r, c): (usize, usize) = match self {
-            ComposeFocus::To => (0, 0),
-            ComposeFocus::Cc => (0, 1),
-            ComposeFocus::Bcc => (1, 0),
-            ComposeFocus::ReplyTo => (1, 1),
-            ComposeFocus::Subject => (2, 0),
-            ComposeFocus::Attach => (2, 1),
-            ComposeFocus::Body => unreachable!(),
-        };
-        let (r, c) = match dir {
-            'k' => (r.saturating_sub(1), c),
-            'j' => {
-                if r == 2 {
-                    return ComposeFocus::Body;
-                }
-                (r + 1, c)
-            }
-            'h' => (r, c.saturating_sub(1)),
-            'l' => (r, (c + 1).min(1)),
-            _ => (r, c),
-        };
-        match (r, c) {
-            (0, 0) => ComposeFocus::To,
-            (0, 1) => ComposeFocus::Cc,
-            (1, 0) => ComposeFocus::Bcc,
-            (1, 1) => ComposeFocus::ReplyTo,
-            (2, 0) => ComposeFocus::Subject,
-            (2, 1) => ComposeFocus::Attach,
+        match dir {
+            'j' => self.next(),
+            'k' => self.prev(),
             _ => self,
         }
     }
@@ -103,8 +77,6 @@ pub struct ComposeState {
     pub bcc: TextInput,
     pub reply_to: TextInput,
     pub subject: TextInput,
-    /// The "type a path" field; committing it pushes onto `attachments`.
-    pub attach_input: TextInput,
     pub attachments: Vec<Attachment>,
     /// The body is composed in `$EDITOR`, not inline.
     pub body: String,
@@ -113,7 +85,7 @@ pub struct ComposeState {
     pub focus: ComposeFocus,
     /// Vim-style modes: navigate rows with j/k when false, type into the focused
     /// field when true (entered with `e`, left with Enter/Esc). Only meaningful
-    /// for the header/attach text fields.
+    /// for the header text fields.
     pub editing: bool,
     /// Threading headers carried over from the message being replied to.
     pub in_reply_to: Option<String>,
@@ -136,7 +108,6 @@ impl ComposeState {
             bcc: TextInput::new(""),
             reply_to: TextInput::new(""),
             subject: TextInput::new(subject),
-            attach_input: TextInput::new(""),
             attachments: Vec::new(),
             body,
             body_scroll: 0,
@@ -161,8 +132,8 @@ impl ComposeState {
         }
     }
 
-    /// The `TextInput` for the currently focused header/attach field, if the
-    /// focus is on a text field (not `Body`).
+    /// The `TextInput` for the currently focused header field, if the focus is
+    /// on a text field (not `Body`).
     pub fn focused_input_mut(&mut self) -> Option<&mut TextInput> {
         match self.focus {
             ComposeFocus::To => Some(&mut self.to),
@@ -170,7 +141,6 @@ impl ComposeState {
             ComposeFocus::Bcc => Some(&mut self.bcc),
             ComposeFocus::ReplyTo => Some(&mut self.reply_to),
             ComposeFocus::Subject => Some(&mut self.subject),
-            ComposeFocus::Attach => Some(&mut self.attach_input),
             ComposeFocus::Body => None,
         }
     }

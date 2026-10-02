@@ -242,6 +242,44 @@ impl App {
         self.pending_external.take()
     }
 
+    /// Queue the external file picker (yazi/lf/ranger) to choose an attachment
+    /// path. No-op with a guidance toast when `compose.file_picker` is unset.
+    pub fn request_file_picker(&mut self) {
+        if self.compose.is_none() {
+            return;
+        }
+        let Some(cmd) = self.config.compose.file_picker.as_deref().map(str::trim) else {
+            self.set_toast(
+                "No file picker configured - set compose.file_picker (e.g. \"yazi --chooser-file {}\")",
+                ToastKind::Info,
+            );
+            return;
+        };
+        if cmd.is_empty() {
+            self.set_toast(
+                "No file picker configured - set compose.file_picker (e.g. \"yazi --chooser-file {}\")",
+                ToastKind::Info,
+            );
+            return;
+        }
+        self.pending_file_picker = Some(PendingFilePicker {
+            picker_cmd: cmd.to_string(),
+        });
+    }
+
+    pub fn take_pending_file_picker(&mut self) -> Option<PendingFilePicker> {
+        self.pending_file_picker.take()
+    }
+
+    /// Add the files selected by the external picker as attachments. An empty
+    /// selection (user cancelled) is silent; an invalid path warns via the
+    /// shared attachment logic.
+    pub fn apply_file_picker_result(&mut self, paths: Vec<String>) {
+        for p in paths {
+            self.add_attachment_from_path(p);
+        }
+    }
+
     /// Store the text returned by an external editor back as the compose body.
     pub fn apply_external_result(&mut self, result: Option<String>) {
         match (&mut self.compose, result) {

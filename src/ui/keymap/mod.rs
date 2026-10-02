@@ -230,6 +230,8 @@ pub fn action_from_name(name: &str) -> Option<Action> {
         "save_draft" => Action::SaveDraft,
         "discard_draft" => Action::DiscardDraft,
         "external_editor" => Action::ExternalEditor,
+        "file_picker" => Action::FilePicker,
+        "remove_attachment" => Action::RemoveAttachment,
         "open_attachment" => Action::OpenAttachment,
         "open_in_browser" => Action::OpenInBrowser,
         "settings" => Action::Settings,
@@ -305,7 +307,7 @@ mod tests {
         search.insert("commit_search".into(), KeySpecs::One("space".into()));
         kb.insert("search".into(), search);
         let mut compose = HashMap::new();
-        compose.insert("send".into(), KeySpecs::One("ctrl+x".into()));
+        compose.insert("send".into(), KeySpecs::One("ctrl+o".into()));
         kb.insert("compose".into(), compose);
         let mut settings = HashMap::new();
         settings.insert("save_settings".into(), KeySpecs::One("s".into()));
@@ -317,8 +319,8 @@ mod tests {
         assert_eq!(resolve(Ctx::Confirm, &[Key::ch('y')], &table), Some(Action::ConfirmYes));
         // Search: space now commits the search.
         assert_eq!(resolve(Ctx::Search, &[Key::ch(' ')], &table), Some(Action::CommitSearch));
-        // Compose: ctrl+x now sends.
-        assert_eq!(resolve(Ctx::Compose, &[Key::cc('x')], &table), Some(Action::Send));
+        // Compose: ctrl+o now sends.
+        assert_eq!(resolve(Ctx::Compose, &[Key::cc('o')], &table), Some(Action::Send));
         // Settings: 's' now saves.
         assert_eq!(resolve(Ctx::Settings, &[Key::ch('s')], &table), Some(Action::SaveSettings));
     }

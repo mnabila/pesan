@@ -1,10 +1,13 @@
 use super::*;
 
-use crate::ui::widget;
+use ratatui::style::Style;
 
-/// One staged attachment row for the compose view.
+use crate::ui::widget;
+use crate::ui::widget::form::FormField;
+
+/// One staged attachment chip for the compose view.
 #[derive(Debug)]
-struct AttachmentRow {
+struct AttachmentChip {
     name: String,
     size: u64,
 }
@@ -13,14 +16,17 @@ struct AttachmentRow {
 pub(super) struct ComposeProps {
     /// Bordered-block title (" Compose ", " Reply ", " Forward ").
     title: String,
-    /// Fixed From line; empty renders the "(no account)" hint.
-    from: String,
-    /// Editable header/attach rows in draw order.
-    fields: Vec<form::FormField>,
-    attachments: Vec<AttachmentRow>,
-    /// When the list overflows its rows, how many are hidden behind the
-    /// "… N more" summary row (`0` shows everything).
-    attachments_hidden: usize,
+    /// Recipient (To) field (left column, row 1).
+    to: FormField,
+    /// Reply-To field (right column, row 1).
+    reply_to: FormField,
+    /// Cc field (left column, row 2).
+    cc: FormField,
+    /// Bcc field (right column, row 2).
+    bcc: FormField,
+    /// Subject field (full width, row 3).
+    subject: FormField,
+    attachments: Vec<AttachmentChip>,
     body: String,
     body_focused: bool,
     body_scroll: u16,
@@ -36,14 +42,12 @@ fn props(app: &App) -> Option<ComposeProps> {
     }
     .to_string();
 
-    // Editable header/attach rows. Each is "label" + a focused clone of the
-    // field's TextInput (so the caret shows on the focused row).
     let mk = |label: &str,
               input: &widget::TextInput,
               focus: ComposeFocus,
               placeholder: &str| {
         let selected = compose.focus == focus;
-        form::FormField::new(
+        FormField::new(
             label,
             input,
             selected,
@@ -51,43 +55,26 @@ fn props(app: &App) -> Option<ComposeProps> {
             placeholder,
         )
     };
-    let fields = vec![
-        mk("To", &compose.to, ComposeFocus::To, "(no recipient)"),
-        mk("Cc", &compose.cc, ComposeFocus::Cc, "(none)"),
-        mk("Bcc", &compose.bcc, ComposeFocus::Bcc, "(none)"),
-        mk(
-            "Reply-To",
-            &compose.reply_to,
-            ComposeFocus::ReplyTo,
-            "(none)",
-        ),
-        mk(
-            "Subject",
-            &compose.subject,
-            ComposeFocus::Subject,
-            "(no subject)",
-        ),
-        mk(
-            "Attach",
-            &compose.attach_input,
-            ComposeFocus::Attach,
-            "(type a file path, Enter to add)",
-        ),
-    ];
+    let to = mk("To", &compose.to, ComposeFocus::To, "(no recipient)");
+    let reply_to = mk(
+        "Reply-To",
+        &compose.reply_to,
+        ComposeFocus::ReplyTo,
+        "(none)",
+    );
+    let cc = mk("Cc", &compose.cc, ComposeFocus::Cc, "(none)");
+    let bcc = mk("Bcc", &compose.bcc, ComposeFocus::Bcc, "(none)");
+    let subject = mk(
+        "Subject",
+        &compose.subject,
+        ComposeFocus::Subject,
+        "(no subject)",
+    );
 
-    // At most 6 attachment rows fit; when more are staged the last visible row
-    // summarizes the remainder so nothing is hidden silently.
-    const MAX_ATTACH_ROWS: usize = 6;
-    let total = compose.attachments.len();
-    let attachments_hidden = total.saturating_sub(if total > MAX_ATTACH_ROWS {
-        MAX_ATTACH_ROWS - 1
-    } else {
-        total
-    });
-    let attachments: Vec<AttachmentRow> = compose
+    let attachments: Vec<AttachmentChip> = compose
         .attachments
         .iter()
-        .map(|att| AttachmentRow {
+        .map(|att| AttachmentChip {
             name: att.filename.clone(),
             size: att.size,
         })
@@ -95,10 +82,12 @@ fn props(app: &App) -> Option<ComposeProps> {
 
     Some(ComposeProps {
         title,
-        from: app.active_account_email().to_string(),
-        fields,
+        to,
+        reply_to,
+        cc,
+        bcc,
+        subject,
         attachments,
-        attachments_hidden,
         body: compose.body.clone(),
         body_focused: compose.focus == ComposeFocus::Body,
         body_scroll: compose.body_scroll as u16,
@@ -121,121 +110,68 @@ fn render(frame: &mut Frame, body: Rect, p: ComposeProps, skin: &Skin) {
     let inner = block.inner(body);
     frame.render_widget(block, body);
 
-    // An inline form: a read-only From line, six editable header/attach rows,
-    // the attachment list, a rule, then the body preview.
-    let attach_rows = if p.attachments_hidden > 0 {
-        // The summary row replaces the last slot.
-        MAX_VISIBLE_ATTACH_ROWS - 1
-    } else {
-        p.attachments.len() as u16
-    };
-    let [from_row, fields_area, attach_list, rule, body_area] = Layout::vertical([
-        Constraint::Length(1),           // From (read-only)
-        Constraint::Length(9),           // 6 fields as a 2-col grid (3 boxes, 3 rows each)
-        Constraint::Length(attach_rows), // staged attachments
-        Constraint::Length(1),           // rule
-        Constraint::Min(3),              // body
+    // Pre-wrap the attachment chips so the attach area is sized to the exact
+    // number of rows it needs (no fixed reserve, no empty space under it).
+    let attach_lines = attachment_lines(&p.attachments, inner.width, skin);
+
+    // Layout:
+    //   From | Reply-To   (3 rows)
+    //   Cc   | Bcc        (3 rows)
+    //   Subject            (3 rows)
+    //   Body               (Min 0; full height when no attachments)
+    //   Attachments        (one row per wrapped chip line)
+    let [header_area, body_area, attach_list] = Layout::vertical([
+        Constraint::Length(9),                       // 3 rows of 2-col fields
+        Constraint::Min(0),                          // Body container
+        Constraint::Length(attach_lines.len() as u16), // staged attachments
     ])
     .areas(inner);
 
-    // From is fixed to the active account.
-    let (from_text, from_style) = if p.from.is_empty() {
-        ("(no account)".to_string(), skin.theme.dim_style())
-    } else {
-        (p.from.clone(), skin.theme.fg_style())
-    };
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(format!("{:<9}", "From"), skin.theme.dim_style()),
-            Span::raw(" "),
-            Span::styled(from_text, from_style),
-        ])),
-        from_row,
-    );
-
-    // Editable header/attach rows, laid out as a 2-column grid of bordered
-    // boxes (3 rows of boxes, each box 3 rows tall = 9 rows total).
-    let [left, _gap, right] = Layout::horizontal([
+    // Header: 2-column grid (From|Reply-To, Cc|Bcc) + full-width Subject.
+    let [row1, row2, subject_area] =
+        Layout::vertical([Constraint::Length(3); 3]).areas(header_area);
+    let [left1, _gap, right1] = Layout::horizontal([
         Constraint::Ratio(1, 2),
         Constraint::Length(1),
         Constraint::Ratio(1, 2),
     ])
-    .areas(fields_area);
-    let left_rows = Layout::vertical([Constraint::Length(3); 3]).split(left);
-    let right_rows = Layout::vertical([Constraint::Length(3); 3]).split(right);
-    for (i, field) in p.fields.iter().enumerate() {
-        let area = if i % 2 == 0 {
-            left_rows[i / 2]
+    .areas(row1);
+    let [left2, _gap2, right2] = Layout::horizontal([
+        Constraint::Ratio(1, 2),
+        Constraint::Length(1),
+        Constraint::Ratio(1, 2),
+    ])
+    .areas(row2);
+
+    form::render_field_box(frame, left1, &p.to, &skin.theme, skin.border);
+    form::render_field_box(frame, right1, &p.reply_to, &skin.theme, skin.border);
+    form::render_field_box(frame, left2, &p.cc, &skin.theme, skin.border);
+    form::render_field_box(frame, right2, &p.bcc, &skin.theme, skin.border);
+    form::render_field_box(frame, subject_area, &p.subject, &skin.theme, skin.border);
+
+    // Body: a bordered container with the body text. Attachments are handled by
+    // Ctrl-f (file picker), not an inline field.
+    let body_block = Block::bordered()
+        .border_type(skin.border)
+        .border_style(if p.body_focused {
+            skin.border_style(true)
         } else {
-            right_rows[i / 2]
-        };
-        form::render_field_box(frame, area, field, skin.theme, skin.border);
-    }
+            skin.border_style(false)
+        })
+        .title(Line::from(Span::styled(
+            " Body ",
+            if p.body_focused {
+                skin.theme.accent_style()
+            } else {
+                skin.theme.dim_style()
+            },
+        )));
+    let body_inner = body_block.inner(body_area);
+    frame.render_widget(body_block, body_area);
 
-    // Staged attachments, one dim row each: "<glyph> name  (size)". When there
-    // are more than fit, the last row summarizes the remainder so nothing is
-    // hidden silently.
-    if attach_rows > 0 {
-        let truncated = p.attachments_hidden > 0;
-        let shown = if truncated {
-            attach_rows as usize - 1
-        } else {
-            p.attachments.len()
-        };
-        let mut lines: Vec<Line> = p
-            .attachments
-            .iter()
-            .take(shown)
-            .map(|att| {
-                Line::from(vec![
-                    Span::styled(
-                        format!("  {} ", skin.glyphs.attachment),
-                        skin.theme.dim_style(),
-                    ),
-                    Span::styled(att.name.clone(), skin.theme.fg_style()),
-                    Span::styled(
-                        format!("  ({})", human_size(att.size)),
-                        skin.theme.dim_style(),
-                    ),
-                ])
-            })
-            .collect();
-        if truncated {
-            lines.push(Line::from(Span::styled(
-                format!("  … {} more", p.attachments_hidden),
-                skin.theme.dim_style(),
-            )));
-        }
-        frame.render_widget(
-            Paragraph::new(lines).style(skin.theme.fg_style()),
-            attach_list,
-        );
-    }
-
-    // Divider between the fields and the body.
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            "─".repeat(rule.width as usize),
-            skin.theme.border_style(false),
-        ))),
-        rule,
-    );
-
-    // Body: a focus-aware label then the wrapped, read-only body text ($EDITOR).
-    let [body_label, body_text_area] =
-        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(body_area);
-    let body_label_style = if p.body_focused {
-        skin.theme.accent_style()
-    } else {
-        skin.theme.dim_style()
-    };
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled("Body", body_label_style))),
-        body_label,
-    );
     let (body_text, body_style) = if p.body.trim().is_empty() {
         (
-            "(empty - press i to edit in $EDITOR)".to_string(),
+            "(empty - press i to edit in $EDITOR, press ctrl+f for attach file)".to_string(),
             skin.theme.dim_style(),
         )
     } else {
@@ -246,14 +182,98 @@ fn render(frame: &mut Frame, body: Rect, p: ComposeProps, skin: &Skin) {
             .style(body_style)
             .wrap(Wrap { trim: false })
             .scroll((p.body_scroll, 0)),
-        body_text_area,
+        body_inner,
     );
+
+    // Staged attachments as pill-style chips, pre-wrapped to the exact rows.
+    if !attach_lines.is_empty() {
+        frame.render_widget(
+            Paragraph::new(attach_lines).style(skin.theme.fg_style()),
+            attach_list,
+        );
+    }
 }
 
-/// Rows available for staged attachments before the "... more" summary kicks in.
-const MAX_VISIBLE_ATTACH_ROWS: u16 = 6;
+/// Lay the staged attachments out as pill-style chips wrapped across rows,
+/// returning one `Line` per row (plus a trailing "+N more" line when the list
+/// overflows `MAX_ATTACH_ROWS`). Empty when there are no attachments, so the
+/// caller can size the attach area to exactly `len()` rows.
+fn attachment_lines<'a>(
+    attachments: &'a [AttachmentChip],
+    width: u16,
+    skin: &Skin,
+) -> Vec<Line<'a>> {
+    if attachments.is_empty() {
+        return Vec::new();
+    }
+    let chips: Vec<Vec<Span>> = attachments
+        .iter()
+        .map(|att| {
+            vec![
+                Span::styled(
+                    format!(" {} ", skin.glyphs.attachment),
+                    Style::new().fg(skin.theme.bg).bg(skin.theme.border),
+                ),
+                Span::styled(att.name.clone(), skin.theme.fg_style()),
+                Span::styled(
+                    format!(" {} ", human_size(att.size)),
+                    skin.theme.dim_style(),
+                ),
+            ]
+        })
+        .collect();
+    let chip_widths: Vec<u16> = chips
+        .iter()
+        .map(|c| c.iter().map(|s| s.width() as u16).sum())
+        .collect();
 
-/// Human-readable byte size for the attachment list (e.g. "312 KB", "1.2 MB").
+    let mut rows: Vec<Vec<usize>> = Vec::new();
+    let mut cur: Vec<usize> = Vec::new();
+    let mut cur_w: u16 = 0;
+    for (i, w) in chip_widths.iter().enumerate() {
+        let add = if cur.is_empty() { *w } else { ATTACH_GAP + *w };
+        if !cur.is_empty() && cur_w + add > width {
+            rows.push(std::mem::take(&mut cur));
+            cur_w = 0;
+        }
+        cur.push(i);
+        cur_w += add;
+    }
+    if !cur.is_empty() {
+        rows.push(cur);
+    }
+
+    let shown_rows = rows.len().min(MAX_ATTACH_ROWS);
+    let shown_count: usize = rows[..shown_rows].iter().map(|r| r.len()).sum();
+    let hidden = chips.len() - shown_count;
+
+    let mut lines: Vec<Line> = Vec::new();
+    for row in &rows[..shown_rows] {
+        let mut spans: Vec<Span> = Vec::new();
+        for (j, &ci) in row.iter().enumerate() {
+            if j > 0 {
+                spans.push(Span::raw(" ".repeat(ATTACH_GAP as usize)));
+            }
+            spans.extend(chips[ci].clone());
+        }
+        lines.push(Line::from(spans));
+    }
+    if hidden > 0 {
+        lines.push(Line::from(Span::styled(
+            format!("  +{hidden} more"),
+            skin.theme.dim_style(),
+        )));
+    }
+    lines
+}
+
+/// Max attachment rows before truncating with a "+N more" summary row.
+const MAX_ATTACH_ROWS: usize = 3;
+
+/// Horizontal gap (cells) between attachment chips.
+const ATTACH_GAP: u16 = 2;
+
+/// Human-readable byte size for the attachment list (e.g., "312 KB", "1.2 MB").
 pub(super) fn human_size(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = 1024 * KB;

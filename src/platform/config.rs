@@ -505,6 +505,11 @@ fn expand_tilde(path: &str) -> String {
 pub struct Compose {
     pub editor: Option<String>,
     pub edit_headers: bool,
+    /// External file picker command for attachments (e.g., "yazi --chooser-file {}").
+    /// `{}` is replaced with a temp file path where the picker writes its selection.
+    /// Also works with "lf -selection-path {}" and "ranger --choosefile {}".
+    #[serde(default)]
+    pub file_picker: Option<String>,
 }
 
 /// Browser configuration for opening URLs and message HTML files.
@@ -751,6 +756,23 @@ mod tests {
         let gruvbox = &parsed.themes["gruvbox"];
         assert_eq!(gruvbox.bg, "#282828");
         assert_eq!(gruvbox.accent, "#83a598");
+    }
+
+    #[test]
+    fn compose_file_picker_defaults_to_none() {
+        let config = Config::default();
+        assert!(config.compose.file_picker.is_none());
+    }
+
+    #[test]
+    fn compose_file_picker_parses_from_yaml() {
+        let yaml =
+            "compose:\n  edit_headers: false\n  file_picker: \"yazi --chooser-file {}\"\n";
+        let parsed: Config = serde_yaml_ng::from_str(yaml).unwrap();
+        assert_eq!(
+            parsed.compose.file_picker.as_deref(),
+            Some("yazi --chooser-file {}")
+        );
     }
 
     #[test]

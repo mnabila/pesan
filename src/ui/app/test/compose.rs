@@ -15,8 +15,8 @@ async fn compose_inline_headers_and_external_body() {
     }
     send_key!(app, Key::enter());
     assert!(!app.compose.as_ref().unwrap().editing);
-    // j down to Subject (To -> Bcc -> Subject in the 2-col grid), edit it.
-    for _ in 0..2 {
+    // j down to Subject (To -> Cc -> Bcc -> Reply-To -> Subject), edit it.
+    for _ in 0..4 {
         send_key!(app, Key::ch('j'));
     }
     assert_eq!(app.compose.as_ref().unwrap().focus, ComposeFocus::Subject);
@@ -97,8 +97,8 @@ async fn compose_send_offline_reports_error_and_keeps_compose() {
         send_key!(app, Key::ch(ch));
     }
     send_key!(app, Key::enter());
-    for _ in 0..2 {
-        send_key!(app, Key::ch('j')); // -> Subject (To -> Bcc -> Subject)
+    for _ in 0..4 {
+        send_key!(app, Key::ch('j')); // -> Subject (To -> Cc -> Bcc -> Reply-To -> Subject)
     }
     send_key!(app, Key::ch('i'));
     for ch in "Hello".chars() {
@@ -157,14 +157,18 @@ async fn compose_jk_navigates_and_i_edits_headers() {
     send_key!(app, Key::ch('z'));
     assert_eq!(app.compose.as_ref().unwrap().to.text(), "");
 
-    // h/l move left/right, j/k move up/down within the 2-column grid.
-    send_key!(app, Key::ch('l')); // To -> Cc (right)
+    // Single-column layout: j/k move down/up through fields in order.
+    send_key!(app, Key::ch('j')); // To -> Cc (down)
     assert_eq!(app.compose.as_ref().unwrap().focus, ComposeFocus::Cc);
-    send_key!(app, Key::ch('h')); // Cc -> To (left)
+    send_key!(app, Key::ch('k')); // Cc -> To (up)
     assert_eq!(app.compose.as_ref().unwrap().focus, ComposeFocus::To);
-    send_key!(app, Key::ch('j')); // To -> Bcc (down)
+    send_key!(app, Key::ch('j')); // To -> Cc (down)
+    assert_eq!(app.compose.as_ref().unwrap().focus, ComposeFocus::Cc);
+    send_key!(app, Key::ch('j')); // Cc -> Bcc (down)
     assert_eq!(app.compose.as_ref().unwrap().focus, ComposeFocus::Bcc);
-    send_key!(app, Key::ch('k')); // Bcc -> To (up)
+    send_key!(app, Key::ch('k')); // Bcc -> Cc (up)
+    assert_eq!(app.compose.as_ref().unwrap().focus, ComposeFocus::Cc);
+    send_key!(app, Key::ch('k')); // Cc -> To (up)
     assert_eq!(app.compose.as_ref().unwrap().focus, ComposeFocus::To);
 
     // i enters edit mode; now keys type into the field; Esc leaves.
@@ -206,5 +210,5 @@ async fn compose_body_scrolls_and_clamps() {
     assert_eq!(app.compose.as_ref().unwrap().body_scroll, 0);
     // j/k move between rows even from the body, so you can leave it.
     send_key!(app, Key::ch('k'));
-    assert_eq!(app.compose.as_ref().unwrap().focus, ComposeFocus::Attach);
+    assert_eq!(app.compose.as_ref().unwrap().focus, ComposeFocus::Subject);
 }

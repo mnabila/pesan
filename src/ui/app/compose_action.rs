@@ -71,16 +71,15 @@ impl App {
         self.set_toast("Draft saving is not yet supported", ToastKind::Warning);
     }
 
-    /// Commit the path typed in the Attach field: expand a leading `~`, verify
-    /// it points at an existing file, then push it onto the attachment list and
-    /// clear the input. A missing/invalid path shows a warning toast.
-    pub(crate) fn add_attachment(&mut self) {
-        let Some(compose) = &self.compose else { return };
-        let raw = compose.attach_input.text().trim().to_string();
-        if raw.is_empty() {
-            return;
-        }
-        let path = expand_tilde(&raw);
+    /// Add an attachment from a path produced by the external file picker:
+    /// expand a leading `~`, verify it points at an existing file, then push it
+    /// onto the attachment list. A missing/invalid path shows a warning toast.
+    pub(crate) fn add_attachment_from_path(&mut self, raw: String) {
+        self.add_attachment_from_str(&raw);
+    }
+
+    fn add_attachment_from_str(&mut self, raw: &str) {
+        let path = expand_tilde(raw);
         let meta = match std::fs::metadata(&path) {
             Ok(m) if m.is_file() => m,
             Ok(_) => {
@@ -95,7 +94,7 @@ impl App {
         let filename = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| raw.clone());
+            .unwrap_or_else(|| raw.to_string());
         let attachment = Attachment {
             path,
             filename: filename.clone(),
@@ -103,14 +102,11 @@ impl App {
         };
         if let Some(compose) = &mut self.compose {
             compose.attachments.push(attachment);
-            compose.attach_input = TextInput::new("");
-            compose.attach_input.focus(true);
         }
         self.set_toast(format!("Attached {filename}"), ToastKind::Info);
     }
 
-    /// Drop the most recently added attachment (bound to Ctrl-x in the Attach
-    /// field).
+    /// Drop the most recently added attachment (bound to Ctrl-x in compose).
     pub(crate) fn remove_last_attachment(&mut self) {
         if let Some(compose) = &mut self.compose
             && let Some(a) = compose.attachments.pop()

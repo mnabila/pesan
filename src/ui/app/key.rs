@@ -270,6 +270,8 @@ impl App {
                 }
             }
             Action::ExternalEditor => self.request_external_editor(),
+            Action::FilePicker => self.request_file_picker(),
+            Action::RemoveAttachment => self.remove_last_attachment(),
             Action::OpenAttachment => {
                 if let Some(env) = self.selected_env()
                     && env.has_attachment

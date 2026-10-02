@@ -6,6 +6,7 @@
 //! or panic. `main` builds config/DB/accounts and hands them to [`run`].
 
 use std::io::{self, Stdout};
+use std::path::Path;
 
 use anyhow::{Context, Result};
 use crossterm::cursor::Show;
@@ -87,6 +88,7 @@ async fn run_app(
             dirty = false;
         }
         let editor = app.take_pending_external();
+        let picker = app.take_pending_file_picker();
         let oauth = app.take_pending_oauth();
         match events.next().await {
             Some(event::Event::Input(ev)) => {
@@ -187,6 +189,17 @@ async fn run_app(
             events.resume_input();
             if let Some(result) = result {
                 app.apply_external_result(result);
+            }
+            dirty = true;
+        }
+        if let Some(pending) = picker {
+            // Same suspend/resume contract as the editor: the picker owns the
+            // terminal while it runs, then the selected path comes back.
+            events.pause_input().await;
+            let result = run_external_file_picker(terminal, pending);
+            events.resume_input();
+            if let Some(result) = result {
+                app.apply_file_picker_result(result);
             }
             dirty = true;
         }
@@ -299,6 +312,78 @@ fn run_external_editor(
     };
     let _ = std::fs::remove_file(&tmp.path);
     result
+}
+
+/// Suspend the TUI, run the configured external file picker (yazi/lf/ranger),
+/// read the selected file paths from the temp selection file, and restore the
+/// terminal. Returns `Some(paths)` when the picker exited zero (one path per
+/// line; empty when the user cancelled), and `None` on setup failure or a
+/// non-zero exit.
+fn run_external_file_picker(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    pending: app::PendingFilePicker,
+) -> Option<Vec<String>> {
+    let tmp = picker_temp_file()?;
+    // Create the selection file up front so the picker always has a valid target.
+    std::fs::write(&tmp.path, b"").ok()?;
+
+    let (program, args) = resolve_picker_cmd(&pending.picker_cmd, &tmp.path);
+
+    if let Err(e) = suspend_terminal() {
+        tracing::warn!("suspend terminal: {e}");
+        return None;
+    }
+    let status = std::process::Command::new(&program).args(args).status();
+    let resumed = resume_terminal(terminal).is_ok();
+    tracing::info!("external picker child exited: {status:?}, resumed={resumed}");
+
+    let result = match status {
+        Ok(st) if st.success() => Some(
+            std::fs::read_to_string(&tmp.path)
+                .map(|s| {
+                    s.lines()
+                        .map(str::trim)
+                        .filter(|l| !l.is_empty())
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default(),
+        ),
+        _ => None,
+    };
+    let _ = std::fs::remove_file(&tmp.path);
+    result
+}
+
+fn picker_temp_file() -> Option<EditorTempFile> {
+    let dir = std::env::temp_dir();
+    let path = dir.join(format!(
+        "pesan-picker-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    Some(EditorTempFile { path })
+}
+
+/// Resolve the configured picker command. `{}` is replaced with the temp
+/// selection-file path; when the command has no `{}` the path is appended as a
+/// positional argument (some tools take it that way). Splits on whitespace,
+/// matching [`resolve_editor_cmd`].
+fn resolve_picker_cmd(configured: &str, tmp_path: &Path) -> (String, Vec<String>) {
+    let mut parts = configured.split_whitespace();
+    let program = parts.next().unwrap_or("").to_string();
+    let mut args: Vec<String> = parts.map(str::to_string).collect();
+    let mut replaced = false;
+    for arg in args.iter_mut() {
+        if arg == "{}" {
+            *arg = tmp_path.to_string_lossy().into_owned();
+            replaced = true;
+        }
+    }
+    if !replaced {
+        args.push(tmp_path.to_string_lossy().into_owned());
+    }
+    (program, args)
 }
 
 /// Release the terminal (alt screen + raw mode) before handing it to a child

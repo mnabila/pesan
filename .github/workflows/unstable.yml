@@ -4,10 +4,38 @@ on:
   push:
     branches:
       - main
+  schedule:
+    # Every day at midnight UTC
+    - cron: "0 0 * * *"
 
 jobs:
+  check:
+    name: Check for changes
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.check.outputs.should_run }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check for commits in last 24h
+        id: check
+        run: |
+          # Push events always run; scheduled runs only if there was a commit
+          # on main within the last 24 hours.
+          if [ "${{ github.event_name }}" != "schedule" ]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+          elif [ -n "$(git log --since='24 hours ago' --oneline)" ]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            echo "No commits in last 24h; skipping unstable build."
+          fi
+
   unstable:
     name: Unstable
+    needs: check
+    if: needs.check.outputs.should_run == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write

@@ -11,8 +11,11 @@ impl App {
             return;
         };
 
-        // Send / save-draft work from anywhere, honoring user remaps.
-        if let Some(a) = keymap::resolve(
+        // Send / save-draft and field-cycling (focus next/prev) work from
+        // anywhere, honoring user remaps; cycling also leaves edit mode.
+        // Scope to the compose keymap only (not Global): otherwise the global
+        // pane-switch keys H/L would leak in as focus prev/next.
+        if let Some(a) = keymap::resolve_in_ctx(
             keymap::Ctx::Compose,
             &[*key],
             &self.keymap_table,
@@ -22,27 +25,22 @@ impl App {
                     self.action(a).await;
                     return;
                 }
+                Action::FocusNext => {
+                    if let Some(c) = &mut self.compose {
+                        c.editing = false;
+                        c.focus = c.focus.next();
+                    }
+                    return;
+                }
+                Action::FocusPrev => {
+                    if let Some(c) = &mut self.compose {
+                        c.editing = false;
+                        c.focus = c.focus.prev();
+                    }
+                    return;
+                }
                 _ => {}
             }
-        }
-
-        // Tab / Shift-Tab always move between rows and leave editing mode.
-        match key.code {
-            KeyCode::Tab => {
-                if let Some(c) = &mut self.compose {
-                    c.editing = false;
-                    c.focus = c.focus.next();
-                }
-                return;
-            }
-            KeyCode::BackTab => {
-                if let Some(c) = &mut self.compose {
-                    c.editing = false;
-                    c.focus = c.focus.prev();
-                }
-                return;
-            }
-            _ => {}
         }
 
         if editing {
@@ -75,18 +73,13 @@ impl App {
     }
 
     /// Editing mode: keystrokes flow into the focused text field; Enter/Esc
-    /// leave edit mode (Attach commits/removes attachment paths).
-    async fn compose_edit_key(&mut self, key: &Key, focus: ComposeFocus) {
+    /// leave edit mode.
+    async fn compose_edit_key(&mut self, key: &Key, _focus: ComposeFocus) {
         match key.code {
-            // Enter/Esc leave editing (Attach commits the path on Enter).
-            KeyCode::Enter if focus == ComposeFocus::Attach => self.add_attachment(),
             KeyCode::Enter | KeyCode::Esc => {
                 if let Some(c) = &mut self.compose {
                     c.editing = false;
                 }
-            }
-            KeyCode::Char('x') if key.ctrl && focus == ComposeFocus::Attach => {
-                self.remove_last_attachment()
             }
             _ => {
                 if let Some(c) = &mut self.compose
@@ -127,6 +120,8 @@ impl App {
                     }
                 }
             }
+            Action::FilePicker => self.action(Action::FilePicker).await,
+            Action::RemoveAttachment => self.remove_last_attachment(),
             // Body scrolling: only meaningful while the body row is focused.
             Action::ScrollDown if focus == ComposeFocus::Body => self.scroll_compose_body(1),
             Action::ScrollUp if focus == ComposeFocus::Body => self.scroll_compose_body(-1),

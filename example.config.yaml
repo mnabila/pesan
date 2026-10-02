@@ -42,6 +42,12 @@ compose:
     null # external editor cmd; null => $VISUAL, then $EDITOR, then "vi"
     # e.g. "nvim", or with args: "code --wait"
   edit_headers: false # true = editor buffer also includes To/Cc/Subject headers
+  # External file picker for attachments (Ctrl-f in compose). The picker writes
+  # the selected path to a temp file; {} is replaced with that path. When unset,
+  # Ctrl-f shows a config hint and attachments are added by typing a path.
+  # file_picker: "yazi --chooser-file {}"
+  # file_picker: "lf -selection-path {}"
+  # file_picker: "ranger --choosefile {}"
 
 # Browser commands for opening URLs. When unset, uses system default handler.
 # Supports full command with arguments (e.g., "firefox --new-window").
@@ -132,11 +138,12 @@ keybinding:
     archive: a
     back: esc
   compose: # compose form (body is edited in $EDITOR)
-    focus_down: [j, down] # next header/attach field
+    focus_down: [j, down] # next header field / body
     focus_up: [k, up] # previous field
     focus_right: [l, right]
     focus_left: [h, left]
-    focus_next: tab
+    focus_next: tab # cycle forward (also leaves edit mode)
+    focus_prev: shift+tab # cycle backward
     edit_field: [i, enter] # edit the focused field, or open the body in $EDITOR
     scroll_down: J # scroll the body (only while the body row is focused)
     scroll_up: K
@@ -147,6 +154,8 @@ keybinding:
     send: ctrl+s
     save_draft: ctrl+d
     external_editor: ctrl+e # edit body in $EDITOR
+    file_picker: ctrl+f # pick an attachment file with the external picker
+    remove_attachment: ctrl+x # drop the most recently added attachment
     discard_draft: esc
   settings: # account manager list
     move_down: [j, down]
